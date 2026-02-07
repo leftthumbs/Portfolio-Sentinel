@@ -19,6 +19,7 @@ import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics 
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns } from "./riskCalculations";
 import { analyzeIntervalFund, compareIntervalFunds } from "./intervalFundAnalyzer";
+import { validateIntervalFund, generateDataQualityReport } from "./dataValidation";
 
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
@@ -3422,7 +3423,7 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     }
   });
 
-  // Interval Funds routes
+  // Interval Funds CRUD routes
   app.get("/api/interval-funds", async (req, res) => {
     try {
       const funds = await storage.getIntervalFunds();
@@ -3430,6 +3431,60 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     } catch (error: any) {
       console.error("Get interval funds error:", error);
       res.status(500).json({ message: "Failed to fetch interval funds" });
+    }
+  });
+
+  app.get("/api/interval-funds-stats", async (req, res) => {
+    try {
+      const funds = await storage.getIntervalFunds();
+      const n = funds.length;
+      if (n === 0) return res.json({ stats: null });
+
+      const num = (v: string | null | undefined) => (v ? parseFloat(v) : 0);
+      const totalAum = funds.reduce((s, f) => s + num(f.totalAum), 0);
+      const avgExpense = funds.reduce((s, f) => s + num(f.expenseRatio), 0) / n;
+      const avgYield = funds.reduce((s, f) => s + num(f.distributionRate), 0) / n;
+      const avgReturn = funds.reduce((s, f) => s + num(f.nav1yrReturn), 0) / n;
+      const avgSharpe = funds.reduce((s, f) => s + num(f.sharpeRatio), 0) / n;
+
+      const byReturn = [...funds].sort((a, b) => num(b.nav1yrReturn) - num(a.nav1yrReturn));
+      const byYield = [...funds].sort((a, b) => num(b.distributionRate) - num(a.distributionRate));
+      const bySharpe = [...funds].sort((a, b) => num(b.sharpeRatio) - num(a.sharpeRatio));
+      const byFee = [...funds].sort((a, b) => num(a.expenseRatio) - num(b.expenseRatio));
+
+      const pick = (f: typeof funds[0]) => ({ id: f.id, name: f.name, ticker: f.ticker, assetClass: f.assetClass });
+
+      // Category breakdown
+      const categories: Record<string, { count: number; totalAum: number; avgReturn: number }> = {};
+      for (const f of funds) {
+        const cat = f.assetClass;
+        if (!categories[cat]) categories[cat] = { count: 0, totalAum: 0, avgReturn: 0 };
+        categories[cat].count++;
+        categories[cat].totalAum += num(f.totalAum);
+        categories[cat].avgReturn += num(f.nav1yrReturn);
+      }
+      for (const cat of Object.keys(categories)) {
+        categories[cat].avgReturn /= categories[cat].count;
+      }
+
+      res.json({
+        stats: {
+          totalFunds: n,
+          totalAum,
+          avgExpenseRatio: avgExpense,
+          avgDistributionRate: avgYield,
+          avg1yrReturn: avgReturn,
+          avgSharpeRatio: avgSharpe,
+          topPerformers: byReturn.slice(0, 5).map((f) => ({ ...pick(f), nav1yrReturn: f.nav1yrReturn })),
+          highestYielding: byYield.slice(0, 5).map((f) => ({ ...pick(f), distributionRate: f.distributionRate })),
+          bestRiskAdjusted: bySharpe.slice(0, 5).map((f) => ({ ...pick(f), sharpeRatio: f.sharpeRatio })),
+          lowestCost: byFee.slice(0, 5).map((f) => ({ ...pick(f), expenseRatio: f.expenseRatio })),
+          categoryBreakdown: categories,
+        },
+      });
+    } catch (error: any) {
+      console.error("Get interval fund stats error:", error);
+      res.status(500).json({ message: "Failed to compute interval fund statistics" });
     }
   });
 
@@ -3523,6 +3578,33 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     } catch (error: any) {
       console.error("Compare interval funds error:", error);
       res.status(500).json({ message: "Failed to compare interval funds" });
+    }
+  });
+
+  // Data Validation & Reconciliation
+  app.get("/api/interval-funds/:id/validate", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const fund = await storage.getIntervalFund(id);
+      if (!fund) {
+        return res.status(404).json({ message: "Interval fund not found" });
+      }
+      const result = validateIntervalFund(fund);
+      res.json({ validation: result });
+    } catch (error: any) {
+      console.error("Validate interval fund error:", error);
+      res.status(500).json({ message: "Failed to validate interval fund" });
+    }
+  });
+
+  app.get("/api/interval-funds-data-quality", async (req, res) => {
+    try {
+      const allFunds = await storage.getIntervalFunds();
+      const report = generateDataQualityReport(allFunds);
+      res.json({ report });
+    } catch (error: any) {
+      console.error("Data quality report error:", error);
+      res.status(500).json({ message: "Failed to generate data quality report" });
     }
   });
 

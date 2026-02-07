@@ -1,13 +1,16 @@
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useState, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   TrendingUp,
   DollarSign,
@@ -22,9 +25,17 @@ import {
   ArrowUpDown,
   Eye,
   Loader2,
+  Search,
+  Award,
+  Activity,
+  PieChart,
+  GitCompare,
+  FileCheck,
+  AlertCircle,
+  Info,
+  Scale,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { queryClient } from "@/lib/queryClient";
 import {
   RadarChart,
   PolarGrid,
@@ -39,7 +50,12 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
+  PieChart as RPieChart,
+  Pie,
+  Cell,
 } from "recharts";
+
+// --- Types ---
 
 interface IntervalFund {
   id: string;
@@ -61,6 +77,9 @@ interface IntervalFund {
   expenseRatio: string | null;
   distributionRate: string | null;
   distributionFrequency: string | null;
+  nav30dReturn: string | null;
+  nav90dReturn: string | null;
+  navYtdReturn: string | null;
   nav1yrReturn: string | null;
   nav3yrReturn: string | null;
   nav5yrReturn: string | null;
@@ -75,6 +94,10 @@ interface IntervalFund {
   topHoldingsPct: string | null;
   numHoldings: number | null;
   leverageRatio: string | null;
+  weightedAvgCoupon: string | null;
+  weightedAvgMaturity: string | null;
+  defaultRate: string | null;
+  fundDomicile: string | null;
 }
 
 interface AnalysisResult {
@@ -82,80 +105,65 @@ interface AnalysisResult {
   fundName: string;
   overallScore: number;
   overallRating: string;
-  liquidity: {
-    repurchaseFrequency: string;
-    repurchaseRate: number;
-    annualLiquidityAccess: number;
-    repurchaseNotice: number;
-    liquidityScore: number;
-    liquidityRating: string;
-  };
-  fees: {
-    managementFee: number;
-    performanceFee: number;
-    expenseRatio: number;
-    totalCostEstimate: number;
-    feeScore: number;
-    feeRating: string;
-    netReturnAfterFees: number;
-  };
-  yield: {
-    distributionRate: number;
-    distributionFrequency: string;
-    nav1yrReturn: number;
-    yieldVsRiskFree: number;
-    yieldSpread: number;
-    incomeScore: number;
-    incomeRating: string;
-  };
-  risk: {
-    volatility: number;
-    sharpeRatio: number;
-    sortinoRatio: number;
-    maxDrawdown: number;
-    beta: number;
-    alpha: number;
-    riskScore: number;
-    riskRating: string;
-  };
-  portfolioFit: {
-    concentrationRisk: number;
-    diversificationBenefit: string;
-    correlationAssessment: string;
-    suitabilityScore: number;
-    suitabilityRating: string;
-  };
-  peerComparison: {
-    fundName: string;
-    returnRank: number;
-    riskRank: number;
-    feeRank: number;
-    liquidityRank: number;
-    overallRank: number;
-    totalPeers: number;
-  } | null;
+  liquidity: { repurchaseFrequency: string; repurchaseRate: number; annualLiquidityAccess: number; repurchaseNotice: number; liquidityScore: number; liquidityRating: string };
+  fees: { managementFee: number; performanceFee: number; expenseRatio: number; totalCostEstimate: number; feeScore: number; feeRating: string; netReturnAfterFees: number };
+  yield: { distributionRate: number; distributionFrequency: string; nav1yrReturn: number; yieldVsRiskFree: number; yieldSpread: number; incomeScore: number; incomeRating: string };
+  risk: { volatility: number; sharpeRatio: number; sortinoRatio: number; maxDrawdown: number; beta: number; alpha: number; riskScore: number; riskRating: string };
+  portfolioFit: { concentrationRisk: number; diversificationBenefit: string; correlationAssessment: string; suitabilityScore: number; suitabilityRating: string };
+  peerComparison: { fundName: string; returnRank: number; riskRank: number; feeRank: number; liquidityRank: number; overallRank: number; totalPeers: number } | null;
   strengths: string[];
   risks: string[];
   recommendation: string;
 }
 
-type SortField = "name" | "distributionRate" | "nav1yrReturn" | "sharpeRatio" | "totalAum" | "expenseRatio";
-type SortDirection = "asc" | "desc";
+interface DashboardStats {
+  totalFunds: number;
+  totalAum: number;
+  avgExpenseRatio: number;
+  avgDistributionRate: number;
+  avg1yrReturn: number;
+  avgSharpeRatio: number;
+  topPerformers: { id: string; name: string; ticker: string | null; assetClass: string; nav1yrReturn: string | null }[];
+  highestYielding: { id: string; name: string; ticker: string | null; assetClass: string; distributionRate: string | null }[];
+  bestRiskAdjusted: { id: string; name: string; ticker: string | null; assetClass: string; sharpeRatio: string | null }[];
+  lowestCost: { id: string; name: string; ticker: string | null; assetClass: string; expenseRatio: string | null }[];
+  categoryBreakdown: Record<string, { count: number; totalAum: number; avgReturn: number }>;
+}
+
+interface ValidationResult {
+  fundId: string;
+  fundName: string;
+  status: "clean" | "warning" | "conflict";
+  validationScore: number;
+  fieldValidations: { field: string; value: string | number | null; source: string; isValid: boolean; issue?: string }[];
+  crossFieldChecks: { name: string; passed: boolean; detail: string; severity: string }[];
+  recommendations: string[];
+}
+
+interface DataQualityReport {
+  totalFunds: number;
+  cleanFunds: number;
+  warningFunds: number;
+  conflictFunds: number;
+  overallScore: number;
+  commonIssues: { issue: string; count: number }[];
+  fundResults: ValidationResult[];
+}
+
+// --- Helpers ---
+
+const PIE_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
 
 function pct(val: string | number | null | undefined): string {
   if (val === null || val === undefined) return "N/A";
   const n = typeof val === "string" ? parseFloat(val) : val;
-  if (isNaN(n)) return "N/A";
-  return `${(n * 100).toFixed(2)}%`;
+  return isNaN(n) ? "N/A" : `${(n * 100).toFixed(2)}%`;
 }
-
-function fmt(val: string | number | null | undefined, decimals = 2): string {
+function fmt(val: string | number | null | undefined, d = 2): string {
   if (val === null || val === undefined) return "N/A";
   const n = typeof val === "string" ? parseFloat(val) : val;
-  if (isNaN(n)) return "N/A";
-  return n.toFixed(decimals);
+  return isNaN(n) ? "N/A" : n.toFixed(d);
 }
-
 function aumFmt(val: string | null | undefined): string {
   if (!val) return "N/A";
   const n = parseFloat(val);
@@ -164,9 +172,10 @@ function aumFmt(val: string | null | undefined): string {
   if (n >= 1e6) return `$${(n / 1e6).toFixed(0)}M`;
   return `$${n.toLocaleString()}`;
 }
+function num(val: string | null | undefined): number { return val ? parseFloat(val) || 0 : 0; }
 
 function ratingBadge(rating: string) {
-  const colors: Record<string, string> = {
+  const m: Record<string, string> = {
     "Excellent": "bg-green-500/15 text-green-700 dark:text-green-400",
     "Good": "bg-blue-500/15 text-blue-700 dark:text-blue-400",
     "Average": "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400",
@@ -178,20 +187,22 @@ function ratingBadge(rating: string) {
     "Underweight": "bg-orange-500/15 text-orange-700 dark:text-orange-400",
     "Avoid": "bg-red-500/15 text-red-700 dark:text-red-400",
   };
-  return (
-    <Badge className={colors[rating] || "bg-muted text-muted-foreground"}>
-      {rating}
-    </Badge>
-  );
+  return <Badge className={m[rating] || "bg-muted text-muted-foreground"}>{rating}</Badge>;
 }
-
-function scoreColor(score: number): string {
-  if (score >= 80) return "text-green-600 dark:text-green-400";
-  if (score >= 65) return "text-blue-600 dark:text-blue-400";
-  if (score >= 50) return "text-yellow-600 dark:text-yellow-400";
-  if (score >= 35) return "text-orange-600 dark:text-orange-400";
+function scoreColor(s: number): string {
+  if (s >= 80) return "text-green-600 dark:text-green-400";
+  if (s >= 65) return "text-blue-600 dark:text-blue-400";
+  if (s >= 50) return "text-yellow-600 dark:text-yellow-400";
+  if (s >= 35) return "text-orange-600 dark:text-orange-400";
   return "text-red-600 dark:text-red-400";
 }
+function statusBadge(status: string) {
+  if (status === "clean") return <Badge className="bg-green-500/15 text-green-700 dark:text-green-400">Clean</Badge>;
+  if (status === "warning") return <Badge className="bg-yellow-500/15 text-yellow-700 dark:text-yellow-400">Warning</Badge>;
+  return <Badge className="bg-red-500/15 text-red-700 dark:text-red-400">Conflict</Badge>;
+}
+
+// --- Sub-components ---
 
 function ScoreGauge({ score, label }: { score: number; label: string }) {
   return (
@@ -203,23 +214,56 @@ function ScoreGauge({ score, label }: { score: number; label: string }) {
   );
 }
 
-function AnalysisDialog({ fund, open, onClose }: { fund: IntervalFund; open: boolean; onClose: () => void }) {
+function LeaderboardCard({ title, icon: Icon, items, valueKey, formatter }: {
+  title: string;
+  icon: React.ElementType;
+  items: { id: string; name: string; ticker: string | null; assetClass: string; [k: string]: any }[];
+  valueKey: string;
+  formatter: (v: any) => string;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm flex items-center gap-2"><Icon className="h-4 w-4" />{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2">
+          {items.map((item, i) => (
+            <div key={item.id} className="flex items-center justify-between text-sm">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground w-4">#{i + 1}</span>
+                <span className="font-medium truncate max-w-[180px]">{item.name}</span>
+              </div>
+              <span className="font-mono text-xs">{formatter(item[valueKey])}</span>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// --- Details Dialog ---
+
+function FundDetailsDialog({ fund, open, onClose }: { fund: IntervalFund; open: boolean; onClose: () => void }) {
   const { data, isLoading } = useQuery<{ analysis: AnalysisResult }>({
     queryKey: [`/api/interval-funds/${fund.id}/analyze`],
     enabled: open,
   });
-
+  const { data: valData } = useQuery<{ validation: ValidationResult }>({
+    queryKey: [`/api/interval-funds/${fund.id}/validate`],
+    enabled: open,
+  });
   const analysis = data?.analysis;
+  const validation = valData?.validation;
 
-  const radarData = analysis
-    ? [
-        { metric: "Liquidity", score: analysis.liquidity.liquidityScore },
-        { metric: "Fees", score: analysis.fees.feeScore },
-        { metric: "Income", score: analysis.yield.incomeScore },
-        { metric: "Risk-Adj", score: analysis.risk.riskScore },
-        { metric: "Portfolio Fit", score: analysis.portfolioFit.suitabilityScore },
-      ]
-    : [];
+  const radarData = analysis ? [
+    { metric: "Liquidity", score: analysis.liquidity.liquidityScore },
+    { metric: "Fees", score: analysis.fees.feeScore },
+    { metric: "Income", score: analysis.yield.incomeScore },
+    { metric: "Risk-Adj", score: analysis.risk.riskScore },
+    { metric: "Portfolio Fit", score: analysis.portfolioFit.suitabilityScore },
+  ] : [];
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
@@ -227,356 +271,481 @@ function AnalysisDialog({ fund, open, onClose }: { fund: IntervalFund; open: boo
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <BarChart3 className="h-5 w-5" />
-            {fund.name} - Fund Analysis
+            {fund.name}
           </DialogTitle>
           <DialogDescription>
             {fund.ticker && <Badge variant="outline" className="mr-2">{fund.ticker}</Badge>}
-            {fund.strategyType} | {fund.assetClass}
+            <Badge variant="outline" className="mr-2">{fund.assetClass}</Badge>
+            <Badge variant="outline">{fund.strategyType}</Badge>
           </DialogDescription>
         </DialogHeader>
 
-        {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          </div>
-        )}
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
+        ) : analysis ? (
+          <Tabs defaultValue="overview" className="space-y-4">
+            <TabsList className="grid grid-cols-4 w-full">
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="performance">Performance</TabsTrigger>
+              <TabsTrigger value="terms">Terms & Fees</TabsTrigger>
+              <TabsTrigger value="risk">Risk & Fit</TabsTrigger>
+            </TabsList>
 
-        {analysis && (
-          <div className="space-y-6">
-            {/* Overall Score */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Card>
-                <CardContent className="pt-6">
-                  <div className="text-center">
-                    <div className={`text-4xl font-bold ${scoreColor(analysis.overallScore)}`}>
-                      {analysis.overallScore}
-                    </div>
+            <TabsContent value="overview" className="space-y-4">
+              {/* Description */}
+              {fund.description && <p className="text-sm text-muted-foreground">{fund.description}</p>}
+
+              {/* Score row */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <Card>
+                  <CardContent className="pt-6 text-center">
+                    <div className={`text-4xl font-bold ${scoreColor(analysis.overallScore)}`}>{analysis.overallScore}</div>
                     <div className="text-sm text-muted-foreground mt-1">Overall Score</div>
                     <div className="mt-2">{ratingBadge(analysis.overallRating)}</div>
-                  </div>
-                </CardContent>
-              </Card>
-              <Card className="col-span-1 md:col-span-2">
-                <CardContent className="pt-6">
-                  <div className="grid grid-cols-5 gap-3">
-                    <ScoreGauge score={analysis.liquidity.liquidityScore * 10} label="Liquidity" />
-                    <ScoreGauge score={analysis.fees.feeScore * 10} label="Fees" />
-                    <ScoreGauge score={analysis.yield.incomeScore * 10} label="Income" />
-                    <ScoreGauge score={analysis.risk.riskScore * 10} label="Risk-Adj" />
-                    <ScoreGauge score={analysis.portfolioFit.suitabilityScore * 10} label="Fit" />
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
+                  </CardContent>
+                </Card>
+                <Card className="col-span-1 md:col-span-2">
+                  <CardContent className="pt-6">
+                    <div className="grid grid-cols-5 gap-3">
+                      <ScoreGauge score={analysis.liquidity.liquidityScore * 10} label="Liquidity" />
+                      <ScoreGauge score={analysis.fees.feeScore * 10} label="Fees" />
+                      <ScoreGauge score={analysis.yield.incomeScore * 10} label="Income" />
+                      <ScoreGauge score={analysis.risk.riskScore * 10} label="Risk-Adj" />
+                      <ScoreGauge score={analysis.portfolioFit.suitabilityScore * 10} label="Fit" />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
 
-            {/* Radar Chart */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">Multi-Factor Analysis</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <RadarChart data={radarData}>
-                      <PolarGrid />
-                      <PolarAngleAxis dataKey="metric" tick={{ fontSize: 12 }} />
-                      <PolarRadiusAxis domain={[0, 10]} tick={{ fontSize: 10 }} />
-                      <Radar
-                        dataKey="score"
-                        stroke="hsl(var(--chart-1))"
-                        fill="hsl(var(--chart-1))"
-                        fillOpacity={0.3}
-                      />
-                    </RadarChart>
-                  </ResponsiveContainer>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Analysis Details Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Liquidity */}
+              {/* Radar */}
               <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <Droplets className="h-4 w-4" /> Liquidity Profile
-                    {ratingBadge(analysis.liquidity.liquidityRating)}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Repurchase Frequency</span>
-                    <span>{analysis.liquidity.repurchaseFrequency}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Repurchase Rate</span>
-                    <span>{(analysis.liquidity.repurchaseRate * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Annual Liquidity Access</span>
-                    <span>{(analysis.liquidity.annualLiquidityAccess * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Notice Period</span>
-                    <span>{analysis.liquidity.repurchaseNotice} days</span>
+                <CardContent className="pt-4">
+                  <div className="h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <RadarChart data={radarData}>
+                        <PolarGrid />
+                        <PolarAngleAxis dataKey="metric" tick={{ fontSize: 12 }} />
+                        <PolarRadiusAxis domain={[0, 10]} tick={{ fontSize: 10 }} />
+                        <Radar dataKey="score" stroke="hsl(var(--chart-1))" fill="hsl(var(--chart-1))" fillOpacity={0.3} />
+                      </RadarChart>
+                    </ResponsiveContainer>
                   </div>
                 </CardContent>
               </Card>
 
-              {/* Fees */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <DollarSign className="h-4 w-4" /> Fee Analysis
-                    {ratingBadge(analysis.fees.feeRating)}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Management Fee</span>
-                    <span>{(analysis.fees.managementFee * 100).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Performance Fee</span>
-                    <span>{(analysis.fees.performanceFee * 100).toFixed(1)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Expense Ratio</span>
-                    <span>{(analysis.fees.expenseRatio * 100).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Est. Total Cost</span>
-                    <span>{(analysis.fees.totalCostEstimate * 100).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between font-medium">
-                    <span className="text-muted-foreground">Net Return After Fees</span>
-                    <span className={analysis.fees.netReturnAfterFees >= 0 ? "text-green-600" : "text-red-600"}>
-                      {(analysis.fees.netReturnAfterFees * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
+              {/* Strengths & Risks */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><CheckCircle className="h-4 w-4 text-green-600" /> Strengths</CardTitle></CardHeader>
+                  <CardContent><ul className="space-y-1.5 text-sm">{analysis.strengths.length > 0 ? analysis.strengths.map((s, i) => <li key={i} className="flex items-start gap-2"><CheckCircle className="h-3 w-3 text-green-500 mt-0.5 shrink-0" /><span>{s}</span></li>) : <li className="text-muted-foreground">No notable strengths identified</li>}</ul></CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-orange-600" /> Risks</CardTitle></CardHeader>
+                  <CardContent><ul className="space-y-1.5 text-sm">{analysis.risks.length > 0 ? analysis.risks.map((r, i) => <li key={i} className="flex items-start gap-2"><XCircle className="h-3 w-3 text-orange-500 mt-0.5 shrink-0" /><span>{r}</span></li>) : <li className="text-muted-foreground">No significant risks identified</li>}</ul></CardContent>
+                </Card>
+              </div>
 
-              {/* Yield */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <Percent className="h-4 w-4" /> Income & Yield
-                    {ratingBadge(analysis.yield.incomeRating)}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Distribution Rate</span>
-                    <span>{(analysis.yield.distributionRate * 100).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Distribution Freq.</span>
-                    <span>{analysis.yield.distributionFrequency}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">1-Year NAV Return</span>
-                    <span>{(analysis.yield.nav1yrReturn * 100).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Yield Spread vs Risk-Free</span>
-                    <span className={analysis.yield.yieldVsRiskFree >= 0 ? "text-green-600" : "text-red-600"}>
-                      {(analysis.yield.yieldVsRiskFree * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
+              <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Recommendation</CardTitle></CardHeader><CardContent><p className="text-sm">{analysis.recommendation}</p></CardContent></Card>
 
-              {/* Risk */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <Shield className="h-4 w-4" /> Risk Profile
-                    {ratingBadge(analysis.risk.riskRating)}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Volatility</span>
-                    <span>{(analysis.risk.volatility * 100).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Sharpe Ratio</span>
-                    <span>{analysis.risk.sharpeRatio.toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Sortino Ratio</span>
-                    <span>{analysis.risk.sortinoRatio.toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Max Drawdown</span>
-                    <span className="text-red-600">{(analysis.risk.maxDrawdown * 100).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Beta</span>
-                    <span>{analysis.risk.beta.toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Alpha</span>
-                    <span className={analysis.risk.alpha >= 0 ? "text-green-600" : "text-red-600"}>
-                      {(analysis.risk.alpha * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
+              {/* Data Validation */}
+              {validation && (
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><FileCheck className="h-4 w-4" />Data Validation {statusBadge(validation.status)}</CardTitle></CardHeader>
+                  <CardContent className="space-y-2 text-sm">
+                    <div className="flex items-center gap-2"><span className="text-muted-foreground">Score:</span><span className="font-bold">{validation.validationScore}/100</span></div>
+                    {validation.crossFieldChecks.filter(c => !c.passed || c.severity === "warning").map((c, i) => (
+                      <div key={i} className="flex items-start gap-2">
+                        {c.severity === "error" ? <XCircle className="h-3 w-3 text-red-500 mt-0.5" /> : <AlertCircle className="h-3 w-3 text-yellow-500 mt-0.5" />}
+                        <span>{c.detail}</span>
+                      </div>
+                    ))}
+                    {validation.status === "clean" && <div className="flex items-center gap-2 text-green-600"><CheckCircle className="h-3 w-3" /><span>All validation checks passed</span></div>}
+                  </CardContent>
+                </Card>
+              )}
+            </TabsContent>
 
-            {/* Portfolio Fit */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Target className="h-4 w-4" /> Portfolio Fit Assessment
-                  {ratingBadge(analysis.portfolioFit.suitabilityRating)}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Diversification Benefit</span>
-                  <span className="text-right max-w-xs">{analysis.portfolioFit.diversificationBenefit}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Correlation Assessment</span>
-                  <span className="text-right max-w-xs">{analysis.portfolioFit.correlationAssessment}</span>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Peer Comparison */}
-            {analysis.peerComparison && (
+            <TabsContent value="performance" className="space-y-4">
               <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <ArrowUpDown className="h-4 w-4" /> Peer Ranking
-                    <Badge variant="outline">
-                      #{analysis.peerComparison.overallRank} of {analysis.peerComparison.totalPeers}
-                    </Badge>
-                  </CardTitle>
-                </CardHeader>
+                <CardHeader className="pb-3"><CardTitle className="text-sm">Performance Returns</CardTitle></CardHeader>
                 <CardContent>
-                  <div className="grid grid-cols-4 gap-4 text-center text-sm">
-                    <div>
-                      <div className="font-bold">#{analysis.peerComparison.returnRank}</div>
-                      <div className="text-xs text-muted-foreground">Return</div>
-                    </div>
-                    <div>
-                      <div className="font-bold">#{analysis.peerComparison.riskRank}</div>
-                      <div className="text-xs text-muted-foreground">Risk-Adj</div>
-                    </div>
-                    <div>
-                      <div className="font-bold">#{analysis.peerComparison.feeRank}</div>
-                      <div className="text-xs text-muted-foreground">Fees</div>
-                    </div>
-                    <div>
-                      <div className="font-bold">#{analysis.peerComparison.liquidityRank}</div>
-                      <div className="text-xs text-muted-foreground">Liquidity</div>
-                    </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    {[["1 Month", fund.nav30dReturn], ["3 Month", fund.nav90dReturn], ["YTD", fund.navYtdReturn], ["1 Year", fund.nav1yrReturn], ["3 Year (Ann.)", fund.nav3yrReturn], ["5 Year (Ann.)", fund.nav5yrReturn], ["Since Inception", fund.inceptionReturn]].map(([label, val]) => (
+                      <div key={label as string}>
+                        <div className="text-muted-foreground">{label}</div>
+                        <div className={`font-bold ${num(val as string) >= 0 ? "text-green-600" : "text-red-600"}`}>{pct(val as string)}</div>
+                      </div>
+                    ))}
                   </div>
                 </CardContent>
               </Card>
-            )}
-
-            {/* Strengths & Risks */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4">
+                <Card><CardContent className="pt-6"><div className="text-muted-foreground text-sm">NAV Per Share</div><div className="text-2xl font-bold">${fmt(fund.navPerShare)}</div></CardContent></Card>
+                <Card><CardContent className="pt-6"><div className="text-muted-foreground text-sm">Total AUM</div><div className="text-2xl font-bold">{aumFmt(fund.totalAum)}</div></CardContent></Card>
+              </div>
               <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <CheckCircle className="h-4 w-4 text-green-600" /> Strengths
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <ul className="space-y-2 text-sm">
-                    {analysis.strengths.length > 0 ? (
-                      analysis.strengths.map((s, i) => (
-                        <li key={i} className="flex items-start gap-2">
-                          <CheckCircle className="h-3 w-3 text-green-500 mt-0.5 shrink-0" />
-                          <span>{s}</span>
-                        </li>
-                      ))
-                    ) : (
-                      <li className="text-muted-foreground">No notable strengths identified</li>
-                    )}
-                  </ul>
+                <CardHeader className="pb-3"><CardTitle className="text-sm">Income</CardTitle></CardHeader>
+                <CardContent className="grid grid-cols-2 gap-4 text-sm">
+                  <div><span className="text-muted-foreground">Distribution Rate</span><div className="font-bold">{pct(fund.distributionRate)}</div></div>
+                  <div><span className="text-muted-foreground">Distribution Freq.</span><div className="font-bold">{fund.distributionFrequency}</div></div>
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="terms" className="space-y-4">
+              <Card>
+                <CardHeader className="pb-3"><CardTitle className="text-sm">Fee Structure</CardTitle></CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  {[["Management Fee", pct(fund.managementFee)], ["Incentive/Performance Fee", pct(fund.performanceFee)], ["Total Expense Ratio", pct(fund.expenseRatio)], ["Est. Total Cost", pct(analysis.fees.totalCostEstimate)], ["Net Return After Fees", pct(analysis.fees.netReturnAfterFees)]].map(([l, v]) => (
+                    <div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span className="font-medium">{v}</span></div>
+                  ))}
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <AlertTriangle className="h-4 w-4 text-orange-600" /> Risks
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <ul className="space-y-2 text-sm">
-                    {analysis.risks.length > 0 ? (
-                      analysis.risks.map((r, i) => (
-                        <li key={i} className="flex items-start gap-2">
-                          <XCircle className="h-3 w-3 text-orange-500 mt-0.5 shrink-0" />
-                          <span>{r}</span>
-                        </li>
-                      ))
-                    ) : (
-                      <li className="text-muted-foreground">No significant risks identified</li>
-                    )}
-                  </ul>
+                <CardHeader className="pb-3"><CardTitle className="text-sm">Repurchase Terms</CardTitle></CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  {[["Frequency", fund.repurchaseFrequency], ["Repurchase Limit", pct(fund.repurchaseRate)], ["Annual Liquidity Access", pct(analysis.liquidity.annualLiquidityAccess)], ["Notice Period", `${fund.repurchaseNotice || 30} days`]].map(([l, v]) => (
+                    <div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span className="font-medium">{v}</span></div>
+                  ))}
                 </CardContent>
               </Card>
-            </div>
+              <Card>
+                <CardHeader className="pb-3"><CardTitle className="text-sm">Investment Details</CardTitle></CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  {[["Min. Investment", fund.minInvestment ? `$${parseFloat(fund.minInvestment).toLocaleString()}` : "N/A"], ["Fund Structure", fund.fundStructure || "Interval Fund"], ["Fund Manager", fund.fundManager || "N/A"], ["Domicile", fund.fundDomicile || "N/A"]].map(([l, v]) => (
+                    <div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span className="font-medium">{v}</span></div>
+                  ))}
+                </CardContent>
+              </Card>
+            </TabsContent>
 
-            {/* Recommendation */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm">Recommendation</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm">{analysis.recommendation}</p>
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Close</Button>
-        </DialogFooter>
+            <TabsContent value="risk" className="space-y-4">
+              <Card>
+                <CardHeader className="pb-3"><CardTitle className="text-sm flex items-center gap-2"><Shield className="h-4 w-4" /> Risk Metrics {ratingBadge(analysis.risk.riskRating)}</CardTitle></CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  {[["Volatility", pct(analysis.risk.volatility)], ["Sharpe Ratio", fmt(analysis.risk.sharpeRatio)], ["Sortino Ratio", fmt(analysis.risk.sortinoRatio)], ["Max Drawdown", pct(analysis.risk.maxDrawdown)], ["Beta", fmt(analysis.risk.beta)], ["Alpha", pct(analysis.risk.alpha)], ["Correlation", fmt(fund.correlation)]].map(([l, v]) => (
+                    <div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span className="font-medium">{v}</span></div>
+                  ))}
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className="pb-3"><CardTitle className="text-sm flex items-center gap-2"><Target className="h-4 w-4" /> Portfolio Fit {ratingBadge(analysis.portfolioFit.suitabilityRating)}</CardTitle></CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  <div><span className="text-muted-foreground">Diversification</span><div className="mt-0.5">{analysis.portfolioFit.diversificationBenefit}</div></div>
+                  <div><span className="text-muted-foreground">Correlation</span><div className="mt-0.5">{analysis.portfolioFit.correlationAssessment}</div></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground"># Holdings</span><span>{fund.numHoldings || "N/A"}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Top Holdings %</span><span>{pct(fund.topHoldingsPct)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Leverage</span><span>{fmt(fund.leverageRatio)}x</span></div>
+                </CardContent>
+              </Card>
+              {analysis.peerComparison && (
+                <Card>
+                  <CardHeader className="pb-3"><CardTitle className="text-sm flex items-center gap-2"><ArrowUpDown className="h-4 w-4" /> Peer Ranking <Badge variant="outline">#{analysis.peerComparison.overallRank} of {analysis.peerComparison.totalPeers}</Badge></CardTitle></CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-4 gap-4 text-center text-sm">
+                      <div><div className="font-bold">#{analysis.peerComparison.returnRank}</div><div className="text-xs text-muted-foreground">Return</div></div>
+                      <div><div className="font-bold">#{analysis.peerComparison.riskRank}</div><div className="text-xs text-muted-foreground">Risk-Adj</div></div>
+                      <div><div className="font-bold">#{analysis.peerComparison.feeRank}</div><div className="text-xs text-muted-foreground">Fees</div></div>
+                      <div><div className="font-bold">#{analysis.peerComparison.liquidityRank}</div><div className="text-xs text-muted-foreground">Liquidity</div></div>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </TabsContent>
+          </Tabs>
+        ) : null}
+        <DialogFooter><Button variant="outline" onClick={onClose}>Close</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
 
-function CompareView() {
-  const { data, isLoading } = useQuery<{ analyses: AnalysisResult[] }>({
-    queryKey: ["/api/interval-funds-compare"],
-  });
+// --- Comparison Dialog ---
 
-  if (isLoading) {
-    return (
-      <div className="space-y-4">
-        {[1, 2, 3].map((i) => (
-          <Skeleton key={i} className="h-16 w-full" />
+function ComparisonPanel({ fundIds, funds }: { fundIds: string[]; funds: IntervalFund[] }) {
+  const selected = funds.filter((f) => fundIds.includes(f.id));
+  if (selected.length < 2) return <p className="text-sm text-muted-foreground py-8 text-center">Select at least 2 funds to compare (up to 5).</p>;
+
+  const rows: { label: string; key: string; fmt: (f: IntervalFund) => string }[] = [
+    { label: "Asset Class", key: "assetClass", fmt: (f) => f.assetClass },
+    { label: "Strategy", key: "strategyType", fmt: (f) => f.strategyType },
+    { label: "NAV", key: "navPerShare", fmt: (f) => `$${parseFloat(f.navPerShare || "0").toFixed(2)}` },
+    { label: "AUM", key: "totalAum", fmt: (f) => aumFmt(f.totalAum) },
+    { label: "1Y Return", key: "nav1yrReturn", fmt: (f) => pct(f.nav1yrReturn) },
+    { label: "3Y Return", key: "nav3yrReturn", fmt: (f) => pct(f.nav3yrReturn) },
+    { label: "5Y Return", key: "nav5yrReturn", fmt: (f) => pct(f.nav5yrReturn) },
+    { label: "Distribution", key: "distributionRate", fmt: (f) => pct(f.distributionRate) },
+    { label: "Expense Ratio", key: "expenseRatio", fmt: (f) => pct(f.expenseRatio) },
+    { label: "Mgmt Fee", key: "managementFee", fmt: (f) => pct(f.managementFee) },
+    { label: "Perf Fee", key: "performanceFee", fmt: (f) => pct(f.performanceFee) },
+    { label: "Sharpe", key: "sharpeRatio", fmt: (f) => fmt(f.sharpeRatio) },
+    { label: "Volatility", key: "volatility", fmt: (f) => pct(f.volatility) },
+    { label: "Max Drawdown", key: "maxDrawdown", fmt: (f) => pct(f.maxDrawdown) },
+    { label: "Beta", key: "beta", fmt: (f) => fmt(f.beta) },
+    { label: "Alpha", key: "alpha", fmt: (f) => pct(f.alpha) },
+    { label: "Repurchase Freq.", key: "repurchaseFrequency", fmt: (f) => f.repurchaseFrequency },
+    { label: "Repurchase Rate", key: "repurchaseRate", fmt: (f) => pct(f.repurchaseRate) },
+    { label: "Notice Period", key: "repurchaseNotice", fmt: (f) => `${f.repurchaseNotice || 30}d` },
+    { label: "Min Investment", key: "minInvestment", fmt: (f) => f.minInvestment ? `$${parseFloat(f.minInvestment).toLocaleString()}` : "N/A" },
+    { label: "# Holdings", key: "numHoldings", fmt: (f) => String(f.numHoldings || "N/A") },
+    { label: "Leverage", key: "leverageRatio", fmt: (f) => `${fmt(f.leverageRatio)}x` },
+  ];
+
+  return (
+    <div className="overflow-x-auto">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="sticky left-0 bg-background z-10 min-w-[140px]">Metric</TableHead>
+            {selected.map((f) => <TableHead key={f.id} className="text-center min-w-[140px]"><div className="font-medium">{f.name}</div><div className="text-xs text-muted-foreground">{f.ticker}</div></TableHead>)}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r) => (
+            <TableRow key={r.key}>
+              <TableCell className="sticky left-0 bg-background z-10 font-medium text-sm">{r.label}</TableCell>
+              {selected.map((f) => <TableCell key={f.id} className="text-center text-sm">{r.fmt(f)}</TableCell>)}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+// --- Dashboard Tab ---
+
+function DashboardTab({ onViewFund }: { onViewFund: (id: string) => void }) {
+  const { data: statsData, isLoading } = useQuery<{ stats: DashboardStats | null }>({ queryKey: ["/api/interval-funds-stats"] });
+  const stats = statsData?.stats;
+
+  if (isLoading) return <div className="space-y-4">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-24 w-full" />)}</div>;
+  if (!stats) return <Card><CardContent className="py-12 text-center text-muted-foreground">No interval funds data available.</CardContent></Card>;
+
+  const catData = Object.entries(stats.categoryBreakdown).map(([name, d], i) => ({ name, value: d.count, aum: d.totalAum, color: PIE_COLORS[i % PIE_COLORS.length] }));
+
+  return (
+    <div className="space-y-6">
+      {/* Market Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+        {[
+          { label: "Total Funds", value: String(stats.totalFunds), icon: Activity },
+          { label: "Total AUM", value: aumFmt(String(stats.totalAum)), icon: DollarSign },
+          { label: "Avg Expense", value: pct(stats.avgExpenseRatio), icon: Percent },
+          { label: "Avg Yield", value: pct(stats.avgDistributionRate), icon: TrendingUp },
+          { label: "Avg 1Y Return", value: pct(stats.avg1yrReturn), icon: BarChart3 },
+          { label: "Avg Sharpe", value: fmt(stats.avgSharpeRatio), icon: Shield },
+        ].map((s) => (
+          <Card key={s.label}>
+            <CardContent className="pt-4 pb-3">
+              <div className="flex items-center gap-1.5 mb-1"><s.icon className="h-3.5 w-3.5 text-muted-foreground" /><span className="text-xs text-muted-foreground">{s.label}</span></div>
+              <div className="text-xl font-bold">{s.value}</div>
+            </CardContent>
+          </Card>
         ))}
       </div>
-    );
-  }
 
-  const analyses = data?.analyses || [];
+      {/* Leaderboards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <LeaderboardCard title="Top 1Y Return" icon={TrendingUp} items={stats.topPerformers} valueKey="nav1yrReturn" formatter={pct} />
+        <LeaderboardCard title="Highest Yield" icon={Percent} items={stats.highestYielding} valueKey="distributionRate" formatter={pct} />
+        <LeaderboardCard title="Best Risk-Adj" icon={Award} items={stats.bestRiskAdjusted} valueKey="sharpeRatio" formatter={(v) => fmt(v)} />
+        <LeaderboardCard title="Lowest Cost" icon={DollarSign} items={stats.lowestCost} valueKey="expenseRatio" formatter={pct} />
+      </div>
 
-  if (analyses.length === 0) {
-    return (
+      {/* Category Breakdown */}
       <Card>
-        <CardContent className="py-12 text-center text-muted-foreground">
-          No interval funds available for comparison. Add funds to get started.
+        <CardHeader><CardTitle className="text-sm flex items-center gap-2"><PieChart className="h-4 w-4" /> Category Breakdown</CardTitle></CardHeader>
+        <CardContent>
+          <div className="flex flex-col md:flex-row items-center gap-6">
+            <div className="h-56 w-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <RPieChart>
+                  <Pie data={catData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={({ name, value }) => `${name}: ${value}`}>
+                    {catData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                  </Pie>
+                  <Tooltip />
+                </RPieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="flex-1 w-full">
+              <Table>
+                <TableHeader><TableRow><TableHead>Category</TableHead><TableHead className="text-center">Funds</TableHead><TableHead className="text-right">AUM</TableHead><TableHead className="text-right">Avg 1Y</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {Object.entries(stats.categoryBreakdown).map(([cat, d], i) => (
+                    <TableRow key={cat}>
+                      <TableCell className="flex items-center gap-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: PIE_COLORS[i % PIE_COLORS.length] }} />{cat}</TableCell>
+                      <TableCell className="text-center">{d.count}</TableCell>
+                      <TableCell className="text-right">{aumFmt(String(d.totalAum))}</TableCell>
+                      <TableCell className="text-right">{pct(d.avgReturn)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
         </CardContent>
       </Card>
-    );
+    </div>
+  );
+}
+
+// --- All Funds Tab ---
+
+function AllFundsTab({ funds, onViewFund, compareIds, onToggleCompare }: {
+  funds: IntervalFund[];
+  onViewFund: (f: IntervalFund) => void;
+  compareIds: string[];
+  onToggleCompare: (id: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [assetFilter, setAssetFilter] = useState("all");
+  const [riskFilter, setRiskFilter] = useState("all");
+  const [minInvFilter, setMinInvFilter] = useState("all");
+  const [sortField, setSortField] = useState<string>("name");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  const assetClasses = useMemo(() => Array.from(new Set(funds.map((f) => f.assetClass))).sort(), [funds]);
+
+  const filtered = useMemo(() => {
+    let list = funds;
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter((f) => f.name.toLowerCase().includes(q) || f.ticker?.toLowerCase().includes(q) || f.fundManager?.toLowerCase().includes(q) || f.assetClass.toLowerCase().includes(q));
+    }
+    if (assetFilter !== "all") list = list.filter((f) => f.assetClass === assetFilter);
+    if (riskFilter !== "all") {
+      if (riskFilter === "low") list = list.filter((f) => num(f.volatility) < 0.05);
+      else if (riskFilter === "medium") list = list.filter((f) => num(f.volatility) >= 0.05 && num(f.volatility) < 0.08);
+      else list = list.filter((f) => num(f.volatility) >= 0.08);
+    }
+    if (minInvFilter !== "all") {
+      if (minInvFilter === "low") list = list.filter((f) => num(f.minInvestment) <= 2500);
+      else if (minInvFilter === "mid") list = list.filter((f) => num(f.minInvestment) > 2500 && num(f.minInvestment) <= 25000);
+      else list = list.filter((f) => num(f.minInvestment) > 25000);
+    }
+    return list;
+  }, [funds, search, assetFilter, riskFilter, minInvFilter]);
+
+  const sorted = useMemo(() => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      switch (sortField) {
+        case "name": return dir * a.name.localeCompare(b.name);
+        case "nav1yrReturn": return dir * (num(a.nav1yrReturn) - num(b.nav1yrReturn));
+        case "distributionRate": return dir * (num(a.distributionRate) - num(b.distributionRate));
+        case "sharpeRatio": return dir * (num(a.sharpeRatio) - num(b.sharpeRatio));
+        case "totalAum": return dir * (num(a.totalAum) - num(b.totalAum));
+        case "expenseRatio": return dir * (num(a.expenseRatio) - num(b.expenseRatio));
+        default: return 0;
+      }
+    });
+  }, [filtered, sortField, sortDir]);
+
+  function toggleSort(field: string) {
+    if (sortField === field) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortField(field); setSortDir("desc"); }
   }
 
-  const sortedByScore = [...analyses].sort((a, b) => b.overallScore - a.overallScore);
+  function SH({ field, children }: { field: string; children: React.ReactNode }) {
+    return <TableHead className="cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort(field)}><div className="flex items-center gap-1">{children}{sortField === field && <ArrowUpDown className="h-3 w-3" />}</div></TableHead>;
+  }
 
-  const barData = sortedByScore.map((a) => ({
-    name: a.fundName.length > 20 ? a.fundName.slice(0, 20) + "..." : a.fundName,
+  return (
+    <div className="space-y-4">
+      {/* Filters */}
+      <div className="flex flex-wrap gap-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input placeholder="Search funds..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
+        </div>
+        <Select value={assetFilter} onValueChange={setAssetFilter}>
+          <SelectTrigger className="w-[160px]"><SelectValue placeholder="Asset Class" /></SelectTrigger>
+          <SelectContent><SelectItem value="all">All Classes</SelectItem>{assetClasses.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+        </Select>
+        <Select value={riskFilter} onValueChange={setRiskFilter}>
+          <SelectTrigger className="w-[140px]"><SelectValue placeholder="Risk Level" /></SelectTrigger>
+          <SelectContent><SelectItem value="all">All Risk</SelectItem><SelectItem value="low">Low (&lt;5%)</SelectItem><SelectItem value="medium">Medium (5-8%)</SelectItem><SelectItem value="high">High (&gt;8%)</SelectItem></SelectContent>
+        </Select>
+        <Select value={minInvFilter} onValueChange={setMinInvFilter}>
+          <SelectTrigger className="w-[160px]"><SelectValue placeholder="Min Investment" /></SelectTrigger>
+          <SelectContent><SelectItem value="all">Any Min</SelectItem><SelectItem value="low">{"<= $2,500"}</SelectItem><SelectItem value="mid">$2.5K - $25K</SelectItem><SelectItem value="high">{"> $25,000"}</SelectItem></SelectContent>
+        </Select>
+      </div>
+
+      <div className="text-xs text-muted-foreground">{sorted.length} fund{sorted.length !== 1 && "s"} shown</div>
+
+      <Card>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10"></TableHead>
+                <SH field="name">Fund</SH>
+                <TableHead>Class</TableHead>
+                <SH field="totalAum">AUM</SH>
+                <SH field="distributionRate">Yield</SH>
+                <SH field="nav1yrReturn">1Y Return</SH>
+                <SH field="sharpeRatio">Sharpe</SH>
+                <SH field="expenseRatio">Expense</SH>
+                <TableHead>Liquidity</TableHead>
+                <TableHead className="text-center">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sorted.map((f) => (
+                <TableRow key={f.id} className="cursor-pointer hover:bg-muted/50" onClick={() => onViewFund(f)}>
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <Checkbox checked={compareIds.includes(f.id)} disabled={!compareIds.includes(f.id) && compareIds.length >= 5} onCheckedChange={() => onToggleCompare(f.id)} />
+                  </TableCell>
+                  <TableCell><div className="font-medium">{f.name}</div><div className="text-xs text-muted-foreground">{f.fundManager}{f.ticker && ` | ${f.ticker}`}</div></TableCell>
+                  <TableCell><Badge variant="outline" className="text-xs">{f.assetClass}</Badge></TableCell>
+                  <TableCell>{aumFmt(f.totalAum)}</TableCell>
+                  <TableCell className="font-medium">{pct(f.distributionRate)}</TableCell>
+                  <TableCell className={num(f.nav1yrReturn) >= 0 ? "text-green-600" : "text-red-600"}>{pct(f.nav1yrReturn)}</TableCell>
+                  <TableCell>{fmt(f.sharpeRatio)}</TableCell>
+                  <TableCell>{pct(f.expenseRatio)}</TableCell>
+                  <TableCell><span className="text-xs">{f.repurchaseFrequency} / {pct(f.repurchaseRate)}</span></TableCell>
+                  <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
+                    <Button size="sm" variant="ghost" onClick={() => onViewFund(f)}><Eye className="h-4 w-4" /></Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {sorted.length === 0 && <TableRow><TableCell colSpan={10} className="text-center text-muted-foreground py-8">No funds match your filters.</TableCell></TableRow>}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// --- Analysis Tab ---
+
+function AnalysisTab() {
+  const { data, isLoading } = useQuery<{ analyses: AnalysisResult[] }>({ queryKey: ["/api/interval-funds-compare"] });
+  const [rankBy, setRankBy] = useState("overallScore");
+  const analyses = data?.analyses || [];
+
+  const sortedAnalyses = useMemo(() => {
+    return [...analyses].sort((a, b) => {
+      switch (rankBy) {
+        case "overallScore": return b.overallScore - a.overallScore;
+        case "return": return b.yield.nav1yrReturn - a.yield.nav1yrReturn;
+        case "sharpe": return b.risk.riskScore - a.risk.riskScore;
+        case "yield": return b.yield.incomeScore - a.yield.incomeScore;
+        case "fees": return b.fees.feeScore - a.fees.feeScore;
+        case "liquidity": return b.liquidity.liquidityScore - a.liquidity.liquidityScore;
+        default: return 0;
+      }
+    });
+  }, [analyses, rankBy]);
+
+  if (isLoading) return <div className="space-y-4">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full" />)}</div>;
+  if (analyses.length === 0) return <Card><CardContent className="py-12 text-center text-muted-foreground">No funds available for analysis.</CardContent></Card>;
+
+  const barData = sortedAnalyses.map((a) => ({
+    name: a.fundName.length > 18 ? a.fundName.slice(0, 18) + "..." : a.fundName,
     fullName: a.fundName,
     Liquidity: a.liquidity.liquidityScore,
     Fees: a.fees.feeScore,
@@ -587,11 +756,12 @@ function CompareView() {
 
   return (
     <div className="space-y-6">
-      {/* Score Comparison Chart */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">Multi-Factor Comparison</CardTitle>
-          <CardDescription>Side-by-side scoring across five dimensions (1-10 scale)</CardDescription>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm">Multi-Factor Comparison</CardTitle>
+            <CardDescription className="text-xs">Side-by-side scoring (1-10 scale)</CardDescription>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="h-80">
@@ -600,13 +770,7 @@ function CompareView() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis type="number" domain={[0, 10]} />
                 <YAxis dataKey="name" type="category" width={150} tick={{ fontSize: 11 }} />
-                <Tooltip
-                  formatter={(value: number, name: string) => [value.toFixed(1), name]}
-                  labelFormatter={(label: string) => {
-                    const item = barData.find((d) => d.name === label);
-                    return item?.fullName || label;
-                  }}
-                />
+                <Tooltip formatter={(v: number, name: string) => [v.toFixed(1), name]} labelFormatter={(l: string) => barData.find((d) => d.name === l)?.fullName || l} />
                 <Legend />
                 <Bar dataKey="Liquidity" fill="hsl(var(--chart-1))" />
                 <Bar dataKey="Fees" fill="hsl(var(--chart-2))" />
@@ -619,37 +783,38 @@ function CompareView() {
         </CardContent>
       </Card>
 
-      {/* Ranking Table */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">Fund Rankings</CardTitle>
-          <CardDescription>Overall scores and ratings sorted by composite score</CardDescription>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm">Fund Rankings</CardTitle>
+            <Select value={rankBy} onValueChange={setRankBy}>
+              <SelectTrigger className="w-[160px] h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="overallScore">Overall Score</SelectItem>
+                <SelectItem value="return">1Y Return</SelectItem>
+                <SelectItem value="sharpe">Risk-Adjusted</SelectItem>
+                <SelectItem value="yield">Income/Yield</SelectItem>
+                <SelectItem value="fees">Fee Efficiency</SelectItem>
+                <SelectItem value="liquidity">Liquidity</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </CardHeader>
         <CardContent>
           <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Rank</TableHead>
-                <TableHead>Fund</TableHead>
-                <TableHead className="text-center">Score</TableHead>
-                <TableHead className="text-center">Rating</TableHead>
-                <TableHead className="text-center">Liquidity</TableHead>
-                <TableHead className="text-center">Fees</TableHead>
-                <TableHead className="text-center">Income</TableHead>
-                <TableHead className="text-center">Risk-Adj</TableHead>
-                <TableHead className="text-center">Fit</TableHead>
-              </TableRow>
-            </TableHeader>
+            <TableHeader><TableRow>
+              <TableHead>#</TableHead><TableHead>Fund</TableHead>
+              <TableHead className="text-center">Score</TableHead><TableHead className="text-center">Rating</TableHead>
+              <TableHead className="text-center">Liq</TableHead><TableHead className="text-center">Fee</TableHead>
+              <TableHead className="text-center">Inc</TableHead><TableHead className="text-center">Risk</TableHead>
+              <TableHead className="text-center">Fit</TableHead>
+            </TableRow></TableHeader>
             <TableBody>
-              {sortedByScore.map((a, idx) => (
+              {sortedAnalyses.map((a, i) => (
                 <TableRow key={a.fundId}>
-                  <TableCell className="font-medium">#{idx + 1}</TableCell>
-                  <TableCell>
-                    <div className="font-medium">{a.fundName}</div>
-                  </TableCell>
-                  <TableCell className="text-center">
-                    <span className={`font-bold ${scoreColor(a.overallScore)}`}>{a.overallScore}</span>
-                  </TableCell>
+                  <TableCell className="font-medium">#{i + 1}</TableCell>
+                  <TableCell><div className="font-medium">{a.fundName}</div></TableCell>
+                  <TableCell className="text-center"><span className={`font-bold ${scoreColor(a.overallScore)}`}>{a.overallScore}</span></TableCell>
                   <TableCell className="text-center">{ratingBadge(a.overallRating)}</TableCell>
                   <TableCell className="text-center">{a.liquidity.liquidityScore.toFixed(1)}</TableCell>
                   <TableCell className="text-center">{a.fees.feeScore.toFixed(1)}</TableCell>
@@ -666,258 +831,137 @@ function CompareView() {
   );
 }
 
+// --- Data Quality Tab ---
+
+function DataQualityTab() {
+  const { data, isLoading } = useQuery<{ report: DataQualityReport }>({ queryKey: ["/api/interval-funds-data-quality"] });
+  if (isLoading) return <div className="space-y-4"><Skeleton className="h-24 w-full" /><Skeleton className="h-48 w-full" /></div>;
+  const report = data?.report;
+  if (!report) return null;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <Card><CardContent className="pt-4 pb-3"><div className="text-xs text-muted-foreground">Overall Score</div><div className={`text-2xl font-bold ${scoreColor(report.overallScore)}`}>{report.overallScore}/100</div></CardContent></Card>
+        <Card><CardContent className="pt-4 pb-3"><div className="text-xs text-muted-foreground">Total Funds</div><div className="text-2xl font-bold">{report.totalFunds}</div></CardContent></Card>
+        <Card><CardContent className="pt-4 pb-3"><div className="text-xs text-muted-foreground flex items-center gap-1"><CheckCircle className="h-3 w-3 text-green-500" />Clean</div><div className="text-2xl font-bold text-green-600">{report.cleanFunds}</div></CardContent></Card>
+        <Card><CardContent className="pt-4 pb-3"><div className="text-xs text-muted-foreground flex items-center gap-1"><AlertCircle className="h-3 w-3 text-yellow-500" />Warning</div><div className="text-2xl font-bold text-yellow-600">{report.warningFunds}</div></CardContent></Card>
+        <Card><CardContent className="pt-4 pb-3"><div className="text-xs text-muted-foreground flex items-center gap-1"><XCircle className="h-3 w-3 text-red-500" />Conflict</div><div className="text-2xl font-bold text-red-600">{report.conflictFunds}</div></CardContent></Card>
+      </div>
+
+      {report.commonIssues.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3"><CardTitle className="text-sm">Common Issues</CardTitle></CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {report.commonIssues.map((ci, i) => (
+                <div key={i} className="flex items-center justify-between text-sm">
+                  <span>{ci.issue}</span>
+                  <Badge variant="outline">{ci.count} fund{ci.count > 1 && "s"}</Badge>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader className="pb-3"><CardTitle className="text-sm">Fund-Level Validation</CardTitle></CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>Fund</TableHead><TableHead className="text-center">Status</TableHead><TableHead className="text-center">Score</TableHead><TableHead>Issues</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {report.fundResults.map((fr) => (
+                <TableRow key={fr.fundId}>
+                  <TableCell className="font-medium">{fr.fundName}</TableCell>
+                  <TableCell className="text-center">{statusBadge(fr.status)}</TableCell>
+                  <TableCell className="text-center"><span className={`font-bold ${scoreColor(fr.validationScore)}`}>{fr.validationScore}</span></TableCell>
+                  <TableCell>
+                    {fr.recommendations.length > 0 ? (
+                      <ul className="text-xs space-y-0.5">
+                        {fr.recommendations.slice(0, 2).map((r, i) => <li key={i} className="text-muted-foreground">{r}</li>)}
+                        {fr.recommendations.length > 2 && <li className="text-muted-foreground">+{fr.recommendations.length - 2} more</li>}
+                      </ul>
+                    ) : <span className="text-xs text-muted-foreground">-</span>}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// --- Main Page ---
+
 export default function IntervalFundsPage() {
   const [selectedFund, setSelectedFund] = useState<IntervalFund | null>(null);
-  const [sortField, setSortField] = useState<SortField>("name");
-  const [sortDir, setSortDir] = useState<SortDirection>("asc");
+  const [compareIds, setCompareIds] = useState<string[]>([]);
 
-  const { data, isLoading } = useQuery<{ funds: IntervalFund[] }>({
-    queryKey: ["/api/interval-funds"],
-  });
-
+  const { data, isLoading } = useQuery<{ funds: IntervalFund[] }>({ queryKey: ["/api/interval-funds"] });
   const funds = data?.funds || [];
 
-  const sortedFunds = [...funds].sort((a, b) => {
-    const dir = sortDir === "asc" ? 1 : -1;
-    switch (sortField) {
-      case "name":
-        return dir * a.name.localeCompare(b.name);
-      case "distributionRate":
-        return dir * (parseFloat(a.distributionRate || "0") - parseFloat(b.distributionRate || "0"));
-      case "nav1yrReturn":
-        return dir * (parseFloat(a.nav1yrReturn || "0") - parseFloat(b.nav1yrReturn || "0"));
-      case "sharpeRatio":
-        return dir * (parseFloat(a.sharpeRatio || "0") - parseFloat(b.sharpeRatio || "0"));
-      case "totalAum":
-        return dir * (parseFloat(a.totalAum || "0") - parseFloat(b.totalAum || "0"));
-      case "expenseRatio":
-        return dir * (parseFloat(a.expenseRatio || "0") - parseFloat(b.expenseRatio || "0"));
-      default:
-        return 0;
-    }
-  });
-
-  function toggleSort(field: SortField) {
-    if (sortField === field) {
-      setSortDir(sortDir === "asc" ? "desc" : "asc");
-    } else {
-      setSortField(field);
-      setSortDir("desc");
-    }
+  function toggleCompare(id: string) {
+    setCompareIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 5 ? [...prev, id] : prev);
   }
 
-  function SortableHeader({ field, children }: { field: SortField; children: React.ReactNode }) {
-    return (
-      <TableHead
-        className="cursor-pointer select-none hover:text-foreground"
-        onClick={() => toggleSort(field)}
-      >
-        <div className="flex items-center gap-1">
-          {children}
-          {sortField === field && (
-            <ArrowUpDown className="h-3 w-3" />
-          )}
-        </div>
-      </TableHead>
-    );
+  function viewFundById(id: string) {
+    const f = funds.find((x) => x.id === id);
+    if (f) setSelectedFund(f);
   }
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Droplets className="h-6 w-6" />
-            Interval Funds Analyzer
-          </h1>
-          <p className="text-muted-foreground mt-1">
-            Analyze and compare interval fund liquidity, fees, yields, and risk profiles
-          </p>
+          <h1 className="text-2xl font-bold flex items-center gap-2"><Droplets className="h-6 w-6" />Interval Funds Analyzer</h1>
+          <p className="text-muted-foreground mt-1">Comprehensive analysis of interval fund liquidity, fees, yields, risk, and data quality</p>
         </div>
-        <Badge variant="outline" className="text-sm">
-          {funds.length} Funds
-        </Badge>
+        <Badge variant="outline" className="text-sm">{funds.length} Funds</Badge>
       </div>
 
-      <Tabs defaultValue="overview">
+      <Tabs defaultValue="dashboard">
         <TabsList>
-          <TabsTrigger value="overview">Fund Overview</TabsTrigger>
-          <TabsTrigger value="compare">Comparative Analysis</TabsTrigger>
+          <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
+          <TabsTrigger value="funds">All Funds</TabsTrigger>
+          <TabsTrigger value="compare" className="flex items-center gap-1">
+            Compare{compareIds.length > 0 && <Badge className="ml-1 h-5 w-5 p-0 text-xs justify-center">{compareIds.length}</Badge>}
+          </TabsTrigger>
+          <TabsTrigger value="analysis">Analysis</TabsTrigger>
+          <TabsTrigger value="quality">Data Quality</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="overview" className="space-y-4">
-          {isLoading ? (
-            <div className="space-y-4">
-              {[1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-16 w-full" />
-              ))}
-            </div>
-          ) : funds.length === 0 ? (
-            <Card>
-              <CardContent className="py-12 text-center text-muted-foreground">
-                No interval funds available. Funds will be seeded automatically on next server restart.
-              </CardContent>
-            </Card>
-          ) : (
-            <>
-              {/* Summary cards */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center gap-2">
-                      <DollarSign className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm text-muted-foreground">Total AUM</span>
-                    </div>
-                    <div className="text-2xl font-bold mt-1">
-                      {aumFmt(
-                        String(funds.reduce((s, f) => s + parseFloat(f.totalAum || "0"), 0))
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center gap-2">
-                      <Percent className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm text-muted-foreground">Avg Distribution Rate</span>
-                    </div>
-                    <div className="text-2xl font-bold mt-1">
-                      {pct(
-                        String(
-                          funds.reduce((s, f) => s + parseFloat(f.distributionRate || "0"), 0) /
-                            funds.length
-                        )
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center gap-2">
-                      <TrendingUp className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm text-muted-foreground">Avg 1-Year Return</span>
-                    </div>
-                    <div className="text-2xl font-bold mt-1">
-                      {pct(
-                        String(
-                          funds.reduce((s, f) => s + parseFloat(f.nav1yrReturn || "0"), 0) /
-                            funds.length
-                        )
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center gap-2">
-                      <Shield className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm text-muted-foreground">Avg Sharpe Ratio</span>
-                    </div>
-                    <div className="text-2xl font-bold mt-1">
-                      {fmt(
-                        String(
-                          funds.reduce((s, f) => s + parseFloat(f.sharpeRatio || "0"), 0) /
-                            funds.length
-                        )
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
+        <TabsContent value="dashboard"><DashboardTab onViewFund={viewFundById} /></TabsContent>
 
-              {/* Funds Table */}
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm">Interval Fund Inventory</CardTitle>
-                  <CardDescription>Click on any fund to view detailed analysis</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <SortableHeader field="name">Fund Name</SortableHeader>
-                        <TableHead>Type</TableHead>
-                        <SortableHeader field="totalAum">AUM</SortableHeader>
-                        <SortableHeader field="distributionRate">Dist. Rate</SortableHeader>
-                        <SortableHeader field="nav1yrReturn">1Y Return</SortableHeader>
-                        <SortableHeader field="sharpeRatio">Sharpe</SortableHeader>
-                        <SortableHeader field="expenseRatio">Expense</SortableHeader>
-                        <TableHead>Liquidity</TableHead>
-                        <TableHead className="text-center">Action</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {sortedFunds.map((fund) => (
-                        <TableRow
-                          key={fund.id}
-                          className="cursor-pointer hover:bg-muted/50"
-                          onClick={() => setSelectedFund(fund)}
-                        >
-                          <TableCell>
-                            <div>
-                              <div className="font-medium">{fund.name}</div>
-                              <div className="text-xs text-muted-foreground">{fund.fundManager}</div>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant="outline" className="text-xs">
-                              {fund.strategyType}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>{aumFmt(fund.totalAum)}</TableCell>
-                          <TableCell className="font-medium">{pct(fund.distributionRate)}</TableCell>
-                          <TableCell
-                            className={
-                              parseFloat(fund.nav1yrReturn || "0") >= 0
-                                ? "text-green-600"
-                                : "text-red-600"
-                            }
-                          >
-                            {pct(fund.nav1yrReturn)}
-                          </TableCell>
-                          <TableCell>{fmt(fund.sharpeRatio)}</TableCell>
-                          <TableCell>{pct(fund.expenseRatio)}</TableCell>
-                          <TableCell>
-                            <span className="text-xs">
-                              {fund.repurchaseFrequency} /{" "}
-                              {parseFloat(fund.repurchaseRate || "0") * 100}%
-                            </span>
-                          </TableCell>
-                          <TableCell className="text-center">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedFund(fund);
-                              }}
-                            >
-                              <Eye className="h-4 w-4" />
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </CardContent>
-              </Card>
-            </>
-          )}
+        <TabsContent value="funds">
+          {isLoading ? <div className="space-y-4">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full" />)}</div>
+            : <AllFundsTab funds={funds} onViewFund={setSelectedFund} compareIds={compareIds} onToggleCompare={toggleCompare} />}
         </TabsContent>
 
         <TabsContent value="compare">
-          <CompareView />
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm flex items-center gap-2"><GitCompare className="h-4 w-4" />Fund Comparison</CardTitle>
+                {compareIds.length > 0 && <Button variant="outline" size="sm" onClick={() => setCompareIds([])}>Clear All</Button>}
+              </div>
+              <CardDescription>Select funds from the All Funds tab (up to 5) to compare side-by-side.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ComparisonPanel fundIds={compareIds} funds={funds} />
+            </CardContent>
+          </Card>
         </TabsContent>
+
+        <TabsContent value="analysis"><AnalysisTab /></TabsContent>
+        <TabsContent value="quality"><DataQualityTab /></TabsContent>
       </Tabs>
 
-      {/* Analysis Dialog */}
-      {selectedFund && (
-        <AnalysisDialog
-          fund={selectedFund}
-          open={!!selectedFund}
-          onClose={() => setSelectedFund(null)}
-        />
-      )}
+      {selectedFund && <FundDetailsDialog fund={selectedFund} open={!!selectedFund} onClose={() => setSelectedFund(null)} />}
     </div>
   );
 }
