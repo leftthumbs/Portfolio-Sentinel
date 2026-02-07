@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { seedDatabase, ensureDefaultUser, seedBenchmarks, seedAlternativeFunds } from "./seed";
+import { seedDatabase, ensureDefaultUser, seedBenchmarks, seedAlternativeFunds, seedIntervalFunds } from "./seed";
 import { z } from "zod";
 import multer from "multer";
 import fs from "fs";
@@ -18,6 +18,7 @@ import { setupAuth } from "./auth";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns } from "./riskCalculations";
+import { analyzeIntervalFund, compareIntervalFunds } from "./intervalFundAnalyzer";
 
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
@@ -75,6 +76,7 @@ export async function registerRoutes(
   // Seed default benchmarks
   await seedBenchmarks();
   await seedAlternativeFunds();
+  await seedIntervalFunds();
   
   let defaultPortfolioId: string | null = null;
 
@@ -3417,6 +3419,110 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     } catch (error: any) {
       console.error("Get composite benchmark returns error:", error);
       res.status(500).json({ message: "Failed to fetch composite benchmark returns" });
+    }
+  });
+
+  // Interval Funds routes
+  app.get("/api/interval-funds", async (req, res) => {
+    try {
+      const funds = await storage.getIntervalFunds();
+      res.json({ funds });
+    } catch (error: any) {
+      console.error("Get interval funds error:", error);
+      res.status(500).json({ message: "Failed to fetch interval funds" });
+    }
+  });
+
+  app.get("/api/interval-funds/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const fund = await storage.getIntervalFund(id);
+      if (!fund) {
+        return res.status(404).json({ message: "Interval fund not found" });
+      }
+      res.json({ fund });
+    } catch (error: any) {
+      console.error("Get interval fund error:", error);
+      res.status(500).json({ message: "Failed to fetch interval fund" });
+    }
+  });
+
+  app.post("/api/interval-funds", async (req, res) => {
+    try {
+      const fund = await storage.createIntervalFund(req.body);
+      res.status(201).json({ fund });
+    } catch (error: any) {
+      console.error("Create interval fund error:", error);
+      res.status(500).json({ message: "Failed to create interval fund" });
+    }
+  });
+
+  app.patch("/api/interval-funds/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const fund = await storage.updateIntervalFund(id, req.body);
+      if (!fund) {
+        return res.status(404).json({ message: "Interval fund not found" });
+      }
+      res.json({ fund });
+    } catch (error: any) {
+      console.error("Update interval fund error:", error);
+      res.status(500).json({ message: "Failed to update interval fund" });
+    }
+  });
+
+  app.delete("/api/interval-funds/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      await storage.deleteIntervalFund(id);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Delete interval fund error:", error);
+      res.status(500).json({ message: "Failed to delete interval fund" });
+    }
+  });
+
+  // Interval Fund Analysis
+  app.get("/api/interval-funds/:id/analyze", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const fund = await storage.getIntervalFund(id);
+      if (!fund) {
+        return res.status(404).json({ message: "Interval fund not found" });
+      }
+
+      const riskFreeRateData = await get3MonthTBillRate();
+      const riskFreeRate = riskFreeRateData.rate / 100;
+
+      const allFunds = await storage.getIntervalFunds();
+      const analysis = analyzeIntervalFund({
+        fund,
+        riskFreeRate,
+        peerFunds: allFunds,
+      });
+
+      res.json({ analysis });
+    } catch (error: any) {
+      console.error("Analyze interval fund error:", error);
+      res.status(500).json({ message: "Failed to analyze interval fund" });
+    }
+  });
+
+  app.get("/api/interval-funds-compare", async (req, res) => {
+    try {
+      const allFunds = await storage.getIntervalFunds();
+      if (allFunds.length === 0) {
+        return res.json({ analyses: [] });
+      }
+
+      const riskFreeRateData = await get3MonthTBillRate();
+      const riskFreeRate = riskFreeRateData.rate / 100;
+
+      const analyses = compareIntervalFunds(allFunds, riskFreeRate);
+      res.json({ analyses });
+    } catch (error: any) {
+      console.error("Compare interval funds error:", error);
+      res.status(500).json({ message: "Failed to compare interval funds" });
     }
   });
 

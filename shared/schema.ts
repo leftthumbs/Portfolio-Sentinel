@@ -337,6 +337,62 @@ export const insertPortfolioBenchmarkSchema = createInsertSchema(portfolioBenchm
 export const insertCompositeBenchmarkSchema = createInsertSchema(compositeBenchmarks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCompositeBenchmarkComponentSchema = createInsertSchema(compositeBenchmarkComponents).omit({ id: true });
 
+export const intervalFunds = pgTable("interval_funds", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  ticker: text("ticker"),
+  fundManager: text("fund_manager"),
+  description: text("description"),
+  assetClass: text("asset_class").notNull(),
+  strategyType: text("strategy_type").notNull(),
+  // Interval fund structure
+  repurchaseFrequency: text("repurchase_frequency").notNull().default("Quarterly"),
+  repurchaseRate: decimal("repurchase_rate", { precision: 6, scale: 4 }),
+  repurchaseNotice: integer("repurchase_notice"),
+  fundStructure: text("fund_structure").default("Interval Fund"),
+  // NAV and pricing
+  navPerShare: decimal("nav_per_share", { precision: 12, scale: 4 }),
+  totalAum: decimal("total_aum", { precision: 20, scale: 2 }),
+  minInvestment: decimal("min_investment", { precision: 20, scale: 2 }),
+  // Fees
+  managementFee: decimal("management_fee", { precision: 6, scale: 4 }),
+  performanceFee: decimal("performance_fee", { precision: 6, scale: 4 }),
+  expenseRatio: decimal("expense_ratio", { precision: 6, scale: 4 }),
+  // Yield and returns
+  distributionRate: decimal("distribution_rate", { precision: 6, scale: 4 }),
+  distributionFrequency: text("distribution_frequency").default("Monthly"),
+  nav30dReturn: decimal("nav_30d_return", { precision: 8, scale: 4 }),
+  nav90dReturn: decimal("nav_90d_return", { precision: 8, scale: 4 }),
+  navYtdReturn: decimal("nav_ytd_return", { precision: 8, scale: 4 }),
+  nav1yrReturn: decimal("nav_1yr_return", { precision: 8, scale: 4 }),
+  nav3yrReturn: decimal("nav_3yr_return", { precision: 8, scale: 4 }),
+  nav5yrReturn: decimal("nav_5yr_return", { precision: 8, scale: 4 }),
+  inceptionReturn: decimal("inception_return", { precision: 8, scale: 4 }),
+  // Risk metrics
+  volatility: decimal("volatility", { precision: 8, scale: 4 }),
+  sharpeRatio: decimal("sharpe_ratio", { precision: 8, scale: 4 }),
+  sortinoRatio: decimal("sortino_ratio", { precision: 8, scale: 4 }),
+  maxDrawdown: decimal("max_drawdown", { precision: 8, scale: 4 }),
+  beta: decimal("beta", { precision: 8, scale: 4 }),
+  alpha: decimal("alpha", { precision: 8, scale: 4 }),
+  correlation: decimal("correlation", { precision: 8, scale: 4 }),
+  // Portfolio composition
+  topHoldingsPct: decimal("top_holdings_pct", { precision: 6, scale: 4 }),
+  numHoldings: integer("num_holdings"),
+  leverageRatio: decimal("leverage_ratio", { precision: 6, scale: 4 }),
+  // Credit-specific (for credit interval funds)
+  weightedAvgCoupon: decimal("weighted_avg_coupon", { precision: 6, scale: 4 }),
+  weightedAvgMaturity: decimal("weighted_avg_maturity", { precision: 6, scale: 2 }),
+  defaultRate: decimal("default_rate", { precision: 6, scale: 4 }),
+  // Metadata
+  inceptionDate: timestamp("inception_date"),
+  fundDomicile: text("fund_domicile"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertIntervalFundSchema = createInsertSchema(intervalFunds).omit({ id: true, createdAt: true, updatedAt: true });
+
 export type InsertPortfolio = z.infer<typeof insertPortfolioSchema>;
 export type InsertHolding = z.infer<typeof insertHoldingSchema>;
 export type InsertPerformance = z.infer<typeof insertPerformanceSchema>;
@@ -380,3 +436,5 @@ export type CompositeBenchmark = typeof compositeBenchmarks.$inferSelect;
 export type CompositeBenchmarkComponent = typeof compositeBenchmarkComponents.$inferSelect;
 export type InsertCompositeBenchmark = z.infer<typeof insertCompositeBenchmarkSchema>;
 export type InsertCompositeBenchmarkComponent = z.infer<typeof insertCompositeBenchmarkComponentSchema>;
+export type IntervalFund = typeof intervalFunds.$inferSelect;
+export type InsertIntervalFund = z.infer<typeof insertIntervalFundSchema>;

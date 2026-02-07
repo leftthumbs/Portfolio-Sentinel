@@ -28,6 +28,7 @@ import FundAnalysisPage from "@/pages/fund-analysis";
 import AnalyticsGlossaryPage from "@/pages/analytics-glossary";
 import BenchmarksPage from "@/pages/benchmarks";
 import PortfolioComparePage from "@/pages/portfolio-compare";
+import IntervalFundsPage from "@/pages/interval-funds";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -54,6 +55,7 @@ function Router() {
       <ProtectedRoute path="/analytics-glossary" component={AnalyticsGlossaryPage} />
       <ProtectedRoute path="/benchmarks" component={BenchmarksPage} />
       <ProtectedRoute path="/portfolio-compare" component={PortfolioComparePage} />
+      <ProtectedRoute path="/interval-funds" component={IntervalFundsPage} />
       <Route component={NotFound} />
     </Switch>
   );

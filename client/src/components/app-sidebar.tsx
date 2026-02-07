@@ -17,7 +17,8 @@ import {
   ChevronDown,
   Wallet,
   Target,
-  GitCompare
+  GitCompare,
+  Droplets
 } from "lucide-react";
 import {
   Sidebar,
@@ -106,6 +107,11 @@ const navigationItems = [
     title: "Fund Analysis",
     url: "/fund-analysis",
     icon: BarChart3,
+  },
+  {
+    title: "Interval Funds",
+    url: "/interval-funds",
+    icon: Droplets,
   },
   {
     title: "Analytics Glossary",
