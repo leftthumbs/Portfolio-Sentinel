@@ -20,6 +20,8 @@ import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns } from "./riskCalculations";
 import { analyzeIntervalFund, compareIntervalFunds } from "./intervalFundAnalyzer";
 import { validateIntervalFund, generateDataQualityReport } from "./dataValidation";
+import { aggregateFundData, refreshFundFromSources, refreshAllFunds, getDataSourceConfig, clearAggregationCache } from "./fundDataAggregator";
+import { lookupCik } from "./secEdgarFeed";
 
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
@@ -3605,6 +3607,98 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     } catch (error: any) {
       console.error("Data quality report error:", error);
       res.status(500).json({ message: "Failed to generate data quality report" });
+    }
+  });
+
+  // ---- External Data Feed Endpoints ----
+
+  // Get data source configuration status
+  app.get("/api/interval-funds-sources/config", async (_req, res) => {
+    try {
+      const config = getDataSourceConfig();
+      res.json({ config });
+    } catch (error: any) {
+      console.error("Data source config error:", error);
+      res.status(500).json({ message: "Failed to get data source configuration" });
+    }
+  });
+
+  // Aggregate data from all external sources for a single fund
+  app.get("/api/interval-funds/:id/sources", async (req, res) => {
+    try {
+      const fund = await storage.getIntervalFund(req.params.id);
+      if (!fund) return res.status(404).json({ message: "Fund not found" });
+      if (!fund.ticker) return res.status(400).json({ message: "Fund has no ticker symbol for external lookups" });
+
+      const aggregated = await aggregateFundData(fund);
+      res.json({ aggregated });
+    } catch (error: any) {
+      console.error("Aggregate fund sources error:", error);
+      res.status(500).json({ message: "Failed to aggregate fund data from external sources" });
+    }
+  });
+
+  // Refresh a single fund from external sources and update the database
+  app.post("/api/interval-funds/:id/refresh", async (req, res) => {
+    try {
+      const fund = await storage.getIntervalFund(req.params.id);
+      if (!fund) return res.status(404).json({ message: "Fund not found" });
+      if (!fund.ticker) return res.status(400).json({ message: "Fund has no ticker symbol for external lookups" });
+
+      const result = await refreshFundFromSources(fund);
+
+      // Apply updates to database if any fields changed
+      if (result.fieldsUpdated.length > 0) {
+        await storage.updateIntervalFund(fund.id, result.updatedData);
+      }
+
+      res.json({ result });
+    } catch (error: any) {
+      console.error("Refresh fund error:", error);
+      res.status(500).json({ message: "Failed to refresh fund from external sources" });
+    }
+  });
+
+  // Refresh all funds from external sources
+  app.post("/api/interval-funds-refresh-all", async (_req, res) => {
+    try {
+      const allFunds = await storage.getIntervalFunds();
+      const { results, summary } = await refreshAllFunds(allFunds);
+
+      // Apply updates to database for each fund that changed
+      for (const result of results) {
+        if (result.fieldsUpdated.length > 0) {
+          await storage.updateIntervalFund(result.fundId, result.updatedData);
+        }
+      }
+
+      res.json({ summary, results });
+    } catch (error: any) {
+      console.error("Refresh all funds error:", error);
+      res.status(500).json({ message: "Failed to refresh all funds from external sources" });
+    }
+  });
+
+  // Lookup SEC CIK for a ticker
+  app.get("/api/interval-funds-sec-lookup/:ticker", async (req, res) => {
+    try {
+      const info = await lookupCik(req.params.ticker);
+      if (!info) return res.status(404).json({ message: `No SEC CIK found for ticker ${req.params.ticker}` });
+      res.json({ secInfo: info });
+    } catch (error: any) {
+      console.error("SEC CIK lookup error:", error);
+      res.status(500).json({ message: "Failed to lookup SEC CIK" });
+    }
+  });
+
+  // Clear all data feed caches (for debugging/forcing fresh data)
+  app.post("/api/interval-funds-sources/clear-cache", async (_req, res) => {
+    try {
+      clearAggregationCache();
+      res.json({ message: "All data feed caches cleared" });
+    } catch (error: any) {
+      console.error("Clear cache error:", error);
+      res.status(500).json({ message: "Failed to clear caches" });
     }
   });
 

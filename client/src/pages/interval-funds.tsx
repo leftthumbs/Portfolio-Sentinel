@@ -1,5 +1,5 @@
-import { useState, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useMemo, useCallback } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,14 @@ import {
   AlertCircle,
   Info,
   Scale,
+  RefreshCw,
+  Database,
+  Globe,
+  Wifi,
+  WifiOff,
+  CloudDownload,
+  Clock,
+  ExternalLink,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -148,6 +156,61 @@ interface DataQualityReport {
   overallScore: number;
   commonIssues: { issue: string; count: number }[];
   fundResults: ValidationResult[];
+}
+
+interface SourceConfig {
+  sources: { name: string; configured: boolean; envVar: string; description: string }[];
+  riskFreeRateSource: string;
+}
+
+interface AggregatedField {
+  field: string;
+  value: string | number | null;
+  source: string;
+  confidence: "high" | "medium" | "low";
+  alternatives?: { source: string; value: string | number | null }[];
+}
+
+interface DataConflict {
+  field: string;
+  values: { source: string; value: string | number | null }[];
+  severity: "minor" | "major";
+  resolution: string;
+}
+
+interface SourceStatus {
+  name: string;
+  available: boolean;
+  lastFetched: string | null;
+  fieldsProvided: string[];
+  error: string | null;
+}
+
+interface AggregatedFundData {
+  fundId: string;
+  ticker: string;
+  sources: SourceStatus[];
+  fields: AggregatedField[];
+  conflicts: DataConflict[];
+  freshestDate: string | null;
+  aggregatedAt: string;
+}
+
+interface RefreshResult {
+  ticker: string;
+  fundId: string;
+  sourcesQueried: string[];
+  sourcesSucceeded: string[];
+  fieldsUpdated: string[];
+  conflicts: DataConflict[];
+}
+
+interface RefreshAllSummary {
+  totalFunds: number;
+  fundsUpdated: number;
+  totalFieldsUpdated: number;
+  totalConflicts: number;
+  sourceAvailability: { source: string; available: number; total: number }[];
 }
 
 // --- Helpers ---
@@ -896,6 +959,335 @@ function DataQualityTab() {
   );
 }
 
+// --- Data Sources Tab ---
+
+function DataSourcesTab({ funds }: { funds: IntervalFund[] }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [selectedFundId, setSelectedFundId] = useState<string | null>(null);
+
+  const { data: configData, isLoading: configLoading } = useQuery<{ config: SourceConfig }>({
+    queryKey: ["/api/interval-funds-sources/config"],
+  });
+
+  const { data: fundSourceData, isLoading: fundSourceLoading } = useQuery<{ aggregated: AggregatedFundData }>({
+    queryKey: ["/api/interval-funds", selectedFundId, "sources"],
+    queryFn: () => fetch(`/api/interval-funds/${selectedFundId}/sources`).then(r => r.json()),
+    enabled: !!selectedFundId,
+  });
+
+  const refreshOneMut = useMutation({
+    mutationFn: (fundId: string) => fetch(`/api/interval-funds/${fundId}/refresh`, { method: "POST" }).then(r => r.json()),
+    onSuccess: (data: { result: RefreshResult }) => {
+      const r = data.result;
+      toast({ title: "Fund Refreshed", description: `${r.ticker}: ${r.fieldsUpdated.length} fields updated from ${r.sourcesSucceeded.length} sources` });
+      queryClient.invalidateQueries({ queryKey: ["/api/interval-funds"] });
+      if (selectedFundId) queryClient.invalidateQueries({ queryKey: ["/api/interval-funds", selectedFundId, "sources"] });
+    },
+    onError: () => toast({ title: "Refresh Failed", description: "Could not refresh fund data", variant: "destructive" }),
+  });
+
+  const refreshAllMut = useMutation({
+    mutationFn: () => fetch("/api/interval-funds-refresh-all", { method: "POST" }).then(r => r.json()),
+    onSuccess: (data: { summary: RefreshAllSummary }) => {
+      const s = data.summary;
+      toast({ title: "All Funds Refreshed", description: `${s.fundsUpdated}/${s.totalFunds} funds updated, ${s.totalFieldsUpdated} fields changed, ${s.totalConflicts} conflicts found` });
+      queryClient.invalidateQueries({ queryKey: ["/api/interval-funds"] });
+    },
+    onError: () => toast({ title: "Refresh Failed", description: "Could not refresh fund data", variant: "destructive" }),
+  });
+
+  const config = configData?.config;
+  const agg = fundSourceData?.aggregated;
+
+  const confidenceColor = (c: string) => c === "high" ? "text-green-600" : c === "medium" ? "text-yellow-600" : "text-red-500";
+  const confidenceBg = (c: string) => c === "high" ? "bg-green-500/15 text-green-700" : c === "medium" ? "bg-yellow-500/15 text-yellow-700" : "bg-red-500/15 text-red-700";
+
+  return (
+    <div className="space-y-6">
+      {/* Source Configuration */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm flex items-center gap-2"><Database className="h-4 w-4" />External Data Sources</CardTitle>
+            <Button
+              variant="default"
+              size="sm"
+              disabled={refreshAllMut.isPending}
+              onClick={() => refreshAllMut.mutate()}
+            >
+              {refreshAllMut.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+              Refresh All Funds
+            </Button>
+          </div>
+          <CardDescription>Status of external data feeds. Configure API keys in environment variables to enable sources.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {configLoading ? <Skeleton className="h-32 w-full" /> : config ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {config.sources.map((src) => (
+                <div key={src.name} className="border rounded-lg p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      {src.configured ? <Wifi className="h-4 w-4 text-green-500" /> : <WifiOff className="h-4 w-4 text-muted-foreground" />}
+                      <span className="font-medium text-sm">{src.name}</span>
+                    </div>
+                    <Badge variant={src.configured ? "default" : "secondary"} className="text-xs">
+                      {src.configured ? "Connected" : "Not Configured"}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{src.description}</p>
+                  <div className="text-xs font-mono text-muted-foreground">{src.envVar}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {config && (
+            <div className="mt-4 text-xs text-muted-foreground flex items-center gap-2">
+              <Info className="h-3 w-3" />
+              Risk-free rate source: {config.riskFreeRateSource}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Refresh Summary */}
+      {refreshAllMut.isSuccess && refreshAllMut.data?.summary && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm flex items-center gap-2"><CloudDownload className="h-4 w-4" />Last Refresh Summary</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="text-center">
+                <div className="text-2xl font-bold">{refreshAllMut.data.summary.fundsUpdated}</div>
+                <div className="text-xs text-muted-foreground">Funds Updated</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{refreshAllMut.data.summary.totalFieldsUpdated}</div>
+                <div className="text-xs text-muted-foreground">Fields Changed</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-yellow-600">{refreshAllMut.data.summary.totalConflicts}</div>
+                <div className="text-xs text-muted-foreground">Conflicts Found</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{refreshAllMut.data.summary.totalFunds}</div>
+                <div className="text-xs text-muted-foreground">Total Funds</div>
+              </div>
+            </div>
+            {refreshAllMut.data.summary.sourceAvailability && (
+              <div className="mt-4 space-y-2">
+                <div className="text-xs font-medium">Source Availability</div>
+                {refreshAllMut.data.summary.sourceAvailability.map((sa) => (
+                  <div key={sa.source} className="flex items-center justify-between text-xs">
+                    <span>{sa.source}</span>
+                    <div className="flex items-center gap-2">
+                      <Progress value={(sa.available / Math.max(sa.total, 1)) * 100} className="w-24 h-2" />
+                      <span className="text-muted-foreground">{sa.available}/{sa.total}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Per-Fund Source Explorer */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm flex items-center gap-2"><Globe className="h-4 w-4" />Fund Source Explorer</CardTitle>
+          <CardDescription>Select a fund to view data from each external source, field-level provenance, and conflicts.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-4">
+            <Select value={selectedFundId || ""} onValueChange={setSelectedFundId}>
+              <SelectTrigger className="w-[350px]"><SelectValue placeholder="Select a fund..." /></SelectTrigger>
+              <SelectContent>
+                {funds.filter(f => f.ticker).map(f => (
+                  <SelectItem key={f.id} value={f.id}>{f.ticker} - {f.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {selectedFundId && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={refreshOneMut.isPending}
+                onClick={() => refreshOneMut.mutate(selectedFundId)}
+              >
+                {refreshOneMut.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+                Refresh
+              </Button>
+            )}
+          </div>
+
+          {fundSourceLoading && selectedFundId && (
+            <div className="space-y-3">
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-32 w-full" />
+            </div>
+          )}
+
+          {agg && (
+            <div className="space-y-4">
+              {/* Source statuses */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {agg.sources.map((src) => (
+                  <div key={src.name} className={`border rounded-lg p-3 ${src.available ? "border-green-500/30 bg-green-500/5" : "border-muted"}`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium">{src.name}</span>
+                      {src.available ? <CheckCircle className="h-4 w-4 text-green-500" /> : <XCircle className="h-4 w-4 text-muted-foreground" />}
+                    </div>
+                    {src.available ? (
+                      <>
+                        <div className="text-xs text-muted-foreground flex items-center gap-1">
+                          <Clock className="h-3 w-3" />
+                          {src.lastFetched ? new Date(src.lastFetched).toLocaleString() : "N/A"}
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {src.fieldsProvided.map(f => (
+                            <Badge key={f} variant="outline" className="text-[10px] h-5">{f}</Badge>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">{src.error || "No data returned"}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Aggregated fields */}
+              {agg.fields.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium mb-2">Aggregated Fields ({agg.fields.length})</h4>
+                  <Table>
+                    <TableHeader><TableRow>
+                      <TableHead>Field</TableHead>
+                      <TableHead>Value</TableHead>
+                      <TableHead>Source</TableHead>
+                      <TableHead>Confidence</TableHead>
+                      <TableHead>Alternatives</TableHead>
+                    </TableRow></TableHeader>
+                    <TableBody>
+                      {agg.fields.map((f) => (
+                        <TableRow key={f.field}>
+                          <TableCell className="font-mono text-xs">{f.field}</TableCell>
+                          <TableCell className="text-sm">
+                            {f.value !== null ? (
+                              typeof f.value === "number" && Math.abs(f.value) < 1
+                                ? pct(f.value)
+                                : typeof f.value === "number" && f.value > 1000000
+                                  ? aumFmt(String(f.value))
+                                  : typeof f.value === "number" ? f.value.toFixed(4) : String(f.value)
+                            ) : <span className="text-muted-foreground">-</span>}
+                          </TableCell>
+                          <TableCell><Badge variant="outline" className="text-xs">{f.source}</Badge></TableCell>
+                          <TableCell><Badge className={`text-xs ${confidenceBg(f.confidence)}`}>{f.confidence}</Badge></TableCell>
+                          <TableCell>
+                            {f.alternatives && f.alternatives.length > 0 ? (
+                              <div className="flex gap-1 flex-wrap">
+                                {f.alternatives.map((alt, i) => (
+                                  <span key={i} className="text-[10px] text-muted-foreground">
+                                    {alt.source}: {alt.value !== null ? (typeof alt.value === "number" && Math.abs(alt.value) < 1 ? pct(alt.value) : String(alt.value)) : "-"}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : <span className="text-xs text-muted-foreground">-</span>}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+
+              {/* Conflicts */}
+              {agg.conflicts.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                    Data Conflicts ({agg.conflicts.length})
+                  </h4>
+                  <div className="space-y-2">
+                    {agg.conflicts.map((c, i) => (
+                      <div key={i} className={`border rounded-lg p-3 ${c.severity === "major" ? "border-red-500/30 bg-red-500/5" : "border-yellow-500/30 bg-yellow-500/5"}`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-mono text-sm">{c.field}</span>
+                          <Badge variant={c.severity === "major" ? "destructive" : "secondary"} className="text-xs">{c.severity}</Badge>
+                        </div>
+                        <div className="flex gap-4 text-xs mb-1">
+                          {c.values.map((v, j) => (
+                            <span key={j}><span className="text-muted-foreground">{v.source}:</span> <span className="font-medium">{v.value !== null ? (typeof v.value === "number" && Math.abs(v.value) < 1 ? pct(v.value) : String(v.value)) : "null"}</span></span>
+                          ))}
+                        </div>
+                        <div className="text-xs text-muted-foreground">{c.resolution}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {agg.conflicts.length === 0 && agg.fields.length > 0 && (
+                <div className="flex items-center gap-2 text-sm text-green-600">
+                  <CheckCircle className="h-4 w-4" />
+                  No conflicts detected between sources
+                </div>
+              )}
+
+              {agg.freshestDate && (
+                <div className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Clock className="h-3 w-3" />
+                  Freshest data point: {new Date(agg.freshestDate).toLocaleString()}
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Per-Fund Refresh Table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm flex items-center gap-2"><RefreshCw className="h-4 w-4" />Individual Fund Refresh</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>Ticker</TableHead>
+              <TableHead>Fund Name</TableHead>
+              <TableHead>Asset Class</TableHead>
+              <TableHead className="text-center">Action</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {funds.filter(f => f.ticker).map((f) => (
+                <TableRow key={f.id}>
+                  <TableCell className="font-mono font-medium">{f.ticker}</TableCell>
+                  <TableCell>{f.name}</TableCell>
+                  <TableCell><Badge variant="outline" className="text-xs">{f.assetClass}</Badge></TableCell>
+                  <TableCell className="text-center">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={refreshOneMut.isPending}
+                      onClick={() => refreshOneMut.mutate(f.id)}
+                    >
+                      <RefreshCw className="h-3 w-3 mr-1" />
+                      Refresh
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 // --- Main Page ---
 
 export default function IntervalFundsPage() {
@@ -933,6 +1325,9 @@ export default function IntervalFundsPage() {
           </TabsTrigger>
           <TabsTrigger value="analysis">Analysis</TabsTrigger>
           <TabsTrigger value="quality">Data Quality</TabsTrigger>
+          <TabsTrigger value="sources" className="flex items-center gap-1">
+            <Database className="h-3 w-3" />Data Sources
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="dashboard"><DashboardTab onViewFund={viewFundById} /></TabsContent>
@@ -959,6 +1354,7 @@ export default function IntervalFundsPage() {
 
         <TabsContent value="analysis"><AnalysisTab /></TabsContent>
         <TabsContent value="quality"><DataQualityTab /></TabsContent>
+        <TabsContent value="sources"><DataSourcesTab funds={funds} /></TabsContent>
       </Tabs>
 
       {selectedFund && <FundDetailsDialog fund={selectedFund} open={!!selectedFund} onClose={() => setSelectedFund(null)} />}
