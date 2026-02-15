@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Info } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ChartSkeleton, MetricCardSkeleton } from "@/components/loading-skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -143,7 +144,7 @@ export default function PerformancePage() {
     );
   }
 
-  // Handle empty performance history
+  // Handle completely empty performance history (no data at all)
   if (!data.performanceHistory || data.performanceHistory.length === 0) {
     return (
       <div className="space-y-6">
@@ -172,6 +173,67 @@ export default function PerformancePage() {
   const performanceHistory = rawPerformanceHistory.filter(
     (p) => new Date(p.date) >= startDate
   );
+
+  // Detect whether the selected time period is fully covered by available data
+  const earliestDataDate = rawPerformanceHistory.length > 0
+    ? new Date(rawPerformanceHistory[0].date)
+    : null;
+  const latestDataDate = rawPerformanceHistory.length > 0
+    ? new Date(rawPerformanceHistory[rawPerformanceHistory.length - 1].date)
+    : null;
+
+  const requestedStartDate = startDate;
+  const portfolioDataGap = earliestDataDate && earliestDataDate > requestedStartDate;
+  const portfolioCoversDays = earliestDataDate && latestDataDate
+    ? Math.round((latestDataDate.getTime() - earliestDataDate.getTime()) / (1000 * 60 * 60 * 24))
+    : 0;
+
+  // Map time period to approximate expected days
+  const expectedDaysForPeriod = (period: string): number => {
+    switch (period) {
+      case "YTD": return Math.round((Date.now() - new Date(new Date().getFullYear(), 0, 1).getTime()) / (1000 * 60 * 60 * 24));
+      case "LTM": case "1Y": return 365;
+      case "3Y": return 365 * 3;
+      case "5Y": return 365 * 5;
+      case "10Y": return 365 * 10;
+      case "SI": return 0; // Since Inception always fits
+      default: return 365;
+    }
+  };
+
+  const expectedDays = expectedDaysForPeriod(selectedTimePeriod);
+
+  // No portfolio data at all for this time period
+  const portfolioHasNoData = performanceHistory.length === 0;
+  // Has some data but doesn't fully cover the period
+  const portfolioHasPartialData = !portfolioHasNoData && portfolioDataGap && selectedTimePeriod !== "SI";
+  // Benchmark has no data for this period
+  const benchmarkHasNoData = (globalBenchmarkReturns?.returns?.length ?? 0) === 0 && !!benchmarkApiId;
+
+  // If data exists in raw history but nothing falls within the selected time period, show an alert
+  if (portfolioHasNoData && rawPerformanceHistory.length > 0) {
+    const dataStart = formatDateFull(rawPerformanceHistory[0].date);
+    const dataEnd = formatDateFull(rawPerformanceHistory[rawPerformanceHistory.length - 1].date);
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-performance-title">Performance Analytics</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {portfolio.name} • {getTimePeriodLabel(selectedTimePeriod)}
+          </p>
+        </div>
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Historical data not available for this period</AlertTitle>
+          <AlertDescription>
+            No portfolio data exists for the selected <strong>{getTimePeriodLabel(selectedTimePeriod)}</strong> time period.
+            Available data ranges from <strong>{dataStart}</strong> to <strong>{dataEnd}</strong>.
+            Try selecting a shorter time period or <strong>Since Inception (SI)</strong> to view all available data.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
 
   const firstInPeriod = performanceHistory[0];
   const lastInPeriod = performanceHistory[performanceHistory.length - 1];
@@ -363,9 +425,8 @@ export default function PerformancePage() {
     benchmark: p.benchmarkValue ? parseFloat(p.benchmarkValue) : null,
   }));
 
-  // Show last N periods depending on cadence
-  const periodReturnTailCount = portfolioCadence === "quarterly" ? 20 : portfolioCadence === "monthly" ? 36 : 90;
-  const periodReturnChart = performanceHistory.slice(-periodReturnTailCount).map((p) => ({
+  // Period return chart uses the full time-period-filtered history (driven by sidebar time period selector)
+  const periodReturnChart = performanceHistory.map((p) => ({
     date: formatDate(p.date),
     fullDate: formatDateFull(p.date),
     period: p.dailyReturn ? parseFloat(p.dailyReturn) * 100 : 0,
@@ -391,6 +452,31 @@ export default function PerformancePage() {
           </Badge>
         )}
       </div>
+
+      {portfolioHasPartialData && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Partial data for selected period</AlertTitle>
+          <AlertDescription>
+            Portfolio data starts {formatDateFull(earliestDataDate!)} which is after
+            the {getTimePeriodLabel(selectedTimePeriod)} start
+            date ({formatDateFull(requestedStartDate)}).
+            Showing {performanceHistory.length} available {portfolioLabels.periods.toLowerCase()} of data.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {benchmarkHasNoData && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Benchmark data not available</AlertTitle>
+          <AlertDescription>
+            No historical return data is available for <strong>{benchmarkDisplayName}</strong> during
+            the selected {getTimePeriodLabel(selectedTimePeriod)} period.
+            Benchmark comparison columns will show &ldquo;—&rdquo; until data is available.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card data-testid="card-performance-comparison">
         <CardContent className="p-0">
@@ -615,7 +701,7 @@ export default function PerformancePage() {
       <Card data-testid="card-period-returns">
         <CardHeader>
           <CardTitle className="text-base font-medium">{portfolioLabels.period === "Day" ? "Daily" : portfolioLabels.period + "ly"} Returns</CardTitle>
-          <CardDescription>Last {periodReturnTailCount} {portfolioLabels.periods.toLowerCase()} of performance</CardDescription>
+          <CardDescription>{getTimePeriodLabel(selectedTimePeriod)} period return distribution ({performanceHistory.length} {portfolioLabels.periods.toLowerCase()})</CardDescription>
         </CardHeader>
         <CardContent>
           <ResponsiveContainer width="100%" height={280}>
