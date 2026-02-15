@@ -1,25 +1,30 @@
-import { google } from 'googleapis';
+import { google, drive_v3 } from 'googleapis';
+
+// Hardcoded folder name restriction - only this folder is accessible
+const ALLOWED_FOLDER_NAME = 'Investment Library';
 
 let connectionSettings: any;
+// Cache the Investment Library folder ID after first lookup
+let investmentLibraryFolderId: string | null = null;
 
 async function getAccessToken() {
   if (connectionSettings && connectionSettings.settings.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
     return connectionSettings.settings.access_token;
   }
-  
+
   const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY 
-    ? 'repl ' + process.env.REPL_IDENTITY 
-    : process.env.WEB_REPL_RENEWAL 
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL 
+  const xReplitToken = process.env.REPL_IDENTITY
+    ? 'repl ' + process.env.REPL_IDENTITY
+    : process.env.WEB_REPL_RENEWAL
+    ? 'depl ' + process.env.WEB_REPL_RENEWAL
     : null;
 
   if (!hostname) {
-    throw new Error('Gmail not configured: REPLIT_CONNECTORS_HOSTNAME environment variable is not set. Enable the Gmail connector in your Replit project settings.');
+    throw new Error('Google Drive not configured: REPLIT_CONNECTORS_HOSTNAME environment variable is not set.');
   }
 
   if (!xReplitToken) {
-    throw new Error('Gmail not configured: authentication token not found. Ensure REPL_IDENTITY or WEB_REPL_RENEWAL environment variables are set.');
+    throw new Error('Google Drive not configured: authentication token not found. Ensure REPL_IDENTITY or WEB_REPL_RENEWAL environment variables are set.');
   }
 
   try {
@@ -33,18 +38,18 @@ async function getAccessToken() {
       }
     ).then(res => res.json()).then(data => data.items?.[0]);
   } catch (fetchError) {
-    throw new Error('Gmail not configured: failed to reach connector service. Check that REPLIT_CONNECTORS_HOSTNAME is correct.');
+    throw new Error('Google Drive not configured: failed to reach connector service.');
   }
 
   const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
 
   if (!connectionSettings || !accessToken) {
-    throw new Error('Gmail not connected: no OAuth access token found. Connect your Gmail account in the Replit Connections panel.');
+    throw new Error('Google account not connected: no OAuth access token found. Connect your Google account in the Replit Connections panel.');
   }
   return accessToken;
 }
 
-async function getUncachableGmailClient() {
+async function getDriveClient(): Promise<drive_v3.Drive> {
   const accessToken = await getAccessToken();
 
   const oauth2Client = new google.auth.OAuth2();
@@ -52,190 +57,205 @@ async function getUncachableGmailClient() {
     access_token: accessToken
   });
 
-  return google.gmail({ version: 'v1', auth: oauth2Client });
+  return google.drive({ version: 'v3', auth: oauth2Client });
 }
 
-export interface GmailMessage {
-  id: string;
-  threadId: string;
-  snippet: string;
-  subject: string;
-  from: string;
-  to: string;
-  date: string;
-  labelIds: string[];
-  isUnread: boolean;
-  hasAttachment: boolean;
+/**
+ * Finds the "Investment Library" folder in Google Drive.
+ * Caches the result to avoid repeated lookups.
+ * Throws if the folder does not exist.
+ */
+async function getInvestmentLibraryFolderId(): Promise<string> {
+  if (investmentLibraryFolderId) {
+    return investmentLibraryFolderId;
+  }
+
+  const drive = await getDriveClient();
+  const response = await drive.files.list({
+    q: `name = '${ALLOWED_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: 'files(id, name)',
+    spaces: 'drive',
+  });
+
+  const folders = response.data.files || [];
+  if (folders.length === 0) {
+    throw new Error(`"${ALLOWED_FOLDER_NAME}" folder not found in Google Drive. Please create it first.`);
+  }
+
+  investmentLibraryFolderId = folders[0].id!;
+  return investmentLibraryFolderId;
 }
 
-export interface GmailLabel {
+/**
+ * Security check: verify that a given file/folder ID is the Investment Library
+ * folder itself or is a descendant of it. Prevents path traversal attacks.
+ */
+async function assertFileWithinInvestmentLibrary(drive: drive_v3.Drive, fileId: string): Promise<void> {
+  const rootId = await getInvestmentLibraryFolderId();
+
+  if (fileId === rootId) {
+    return; // The root folder itself is always allowed
+  }
+
+  // Walk up the parent chain to verify ancestry
+  let currentId = fileId;
+  const visited = new Set<string>();
+
+  while (currentId) {
+    if (visited.has(currentId)) {
+      throw new Error('Access denied: circular reference detected.');
+    }
+    visited.add(currentId);
+
+    if (currentId === rootId) {
+      return; // Found the Investment Library in the ancestry chain
+    }
+
+    const file = await drive.files.get({
+      fileId: currentId,
+      fields: 'parents',
+    });
+
+    const parents = file.data.parents;
+    if (!parents || parents.length === 0) {
+      break; // Reached the root of Drive without finding Investment Library
+    }
+
+    currentId = parents[0];
+  }
+
+  throw new Error('Access denied: file is outside the Investment Library folder.');
+}
+
+export interface DriveFile {
   id: string;
   name: string;
-  type: string;
-  messagesTotal: number;
-  messagesUnread: number;
+  mimeType: string;
+  size: number;
+  modifiedTime: string;
+  webViewLink: string;
+  iconLink: string;
+  isFolder: boolean;
 }
 
-function parseHeader(headers: any[], name: string): string {
-  const header = headers?.find((h: any) => h.name.toLowerCase() === name.toLowerCase());
-  return header?.value || '';
-}
+/**
+ * Lists files inside a folder within the Investment Library.
+ * If no folderId is provided, lists the root Investment Library folder.
+ */
+export async function listDriveFiles(folderId?: string): Promise<DriveFile[]> {
+  const drive = await getDriveClient();
+  const targetFolderId = folderId || await getInvestmentLibraryFolderId();
 
-export async function listMessages(query?: string, maxResults: number = 20): Promise<GmailMessage[]> {
-  const gmail = await getUncachableGmailClient();
-  
-  const response = await gmail.users.messages.list({
-    userId: 'me',
-    q: query || '',
-    maxResults,
+  // Security: ensure the target folder is within Investment Library
+  await assertFileWithinInvestmentLibrary(drive, targetFolderId);
+
+  const response = await drive.files.list({
+    q: `'${targetFolderId}' in parents and trashed = false`,
+    fields: 'files(id, name, mimeType, size, modifiedTime, webViewLink, iconLink)',
+    orderBy: 'folder,name',
+    pageSize: 100,
   });
 
-  const messages = response.data.messages || [];
-  
-  const fullMessages = await Promise.all(
-    messages.map(async (msg) => {
-      const full = await gmail.users.messages.get({
-        userId: 'me',
-        id: msg.id!,
-        format: 'metadata',
-        metadataHeaders: ['Subject', 'From', 'To', 'Date'],
+  return (response.data.files || []).map((file) => ({
+    id: file.id!,
+    name: file.name!,
+    mimeType: file.mimeType || '',
+    size: parseInt(file.size || '0', 10),
+    modifiedTime: file.modifiedTime || '',
+    webViewLink: file.webViewLink || '',
+    iconLink: file.iconLink || '',
+    isFolder: file.mimeType === 'application/vnd.google-apps.folder',
+  }));
+}
+
+/**
+ * Search for files within the Investment Library folder only.
+ */
+export async function searchDriveFiles(query: string): Promise<DriveFile[]> {
+  const drive = await getDriveClient();
+  const rootId = await getInvestmentLibraryFolderId();
+
+  // Search scoped to the Investment Library folder tree
+  const response = await drive.files.list({
+    q: `name contains '${query.replace(/'/g, "\\'")}' and trashed = false`,
+    fields: 'files(id, name, mimeType, size, modifiedTime, webViewLink, iconLink, parents)',
+    orderBy: 'folder,name',
+    pageSize: 50,
+  });
+
+  const allFiles = response.data.files || [];
+
+  // Filter results to only include files that are descendants of Investment Library
+  const validFiles: DriveFile[] = [];
+  for (const file of allFiles) {
+    try {
+      await assertFileWithinInvestmentLibrary(drive, file.id!);
+      validFiles.push({
+        id: file.id!,
+        name: file.name!,
+        mimeType: file.mimeType || '',
+        size: parseInt(file.size || '0', 10),
+        modifiedTime: file.modifiedTime || '',
+        webViewLink: file.webViewLink || '',
+        iconLink: file.iconLink || '',
+        isFolder: file.mimeType === 'application/vnd.google-apps.folder',
       });
-      
-      const headers = full.data.payload?.headers || [];
-      const parts = full.data.payload?.parts || [];
-      const hasAttachment = parts.some((part: any) => part.filename && part.filename.length > 0);
-      
-      return {
-        id: full.data.id!,
-        threadId: full.data.threadId!,
-        snippet: full.data.snippet || '',
-        subject: parseHeader(headers, 'Subject'),
-        from: parseHeader(headers, 'From'),
-        to: parseHeader(headers, 'To'),
-        date: parseHeader(headers, 'Date'),
-        labelIds: full.data.labelIds || [],
-        isUnread: (full.data.labelIds || []).includes('UNREAD'),
-        hasAttachment,
-      };
-    })
-  );
-
-  return fullMessages;
-}
-
-export async function getMessage(messageId: string): Promise<{ message: GmailMessage; body: string }> {
-  const gmail = await getUncachableGmailClient();
-  
-  const full = await gmail.users.messages.get({
-    userId: 'me',
-    id: messageId,
-    format: 'full',
-  });
-  
-  const headers = full.data.payload?.headers || [];
-  const parts = full.data.payload?.parts || [];
-  const hasAttachment = parts.some((part: any) => part.filename && part.filename.length > 0);
-  
-  let body = '';
-  if (full.data.payload?.body?.data) {
-    body = Buffer.from(full.data.payload.body.data, 'base64').toString('utf-8');
-  } else if (parts.length > 0) {
-    const textPart = parts.find((p: any) => p.mimeType === 'text/plain');
-    const htmlPart = parts.find((p: any) => p.mimeType === 'text/html');
-    const part = textPart || htmlPart;
-    if (part?.body?.data) {
-      body = Buffer.from(part.body.data, 'base64').toString('utf-8');
+    } catch {
+      // File is outside Investment Library — silently skip
     }
   }
-  
+
+  return validFiles;
+}
+
+/**
+ * Get metadata for a single file, only if it's within the Investment Library.
+ */
+export async function getDriveFile(fileId: string): Promise<DriveFile> {
+  const drive = await getDriveClient();
+
+  // Security: ensure file is within Investment Library
+  await assertFileWithinInvestmentLibrary(drive, fileId);
+
+  const file = await drive.files.get({
+    fileId,
+    fields: 'id, name, mimeType, size, modifiedTime, webViewLink, iconLink',
+  });
+
   return {
-    message: {
-      id: full.data.id!,
-      threadId: full.data.threadId!,
-      snippet: full.data.snippet || '',
-      subject: parseHeader(headers, 'Subject'),
-      from: parseHeader(headers, 'From'),
-      to: parseHeader(headers, 'To'),
-      date: parseHeader(headers, 'Date'),
-      labelIds: full.data.labelIds || [],
-      isUnread: (full.data.labelIds || []).includes('UNREAD'),
-      hasAttachment,
-    },
-    body,
+    id: file.data.id!,
+    name: file.data.name!,
+    mimeType: file.data.mimeType || '',
+    size: parseInt(file.data.size || '0', 10),
+    modifiedTime: file.data.modifiedTime || '',
+    webViewLink: file.data.webViewLink || '',
+    iconLink: file.data.iconLink || '',
+    isFolder: file.data.mimeType === 'application/vnd.google-apps.folder',
   };
 }
 
-export async function listLabels(): Promise<GmailLabel[]> {
-  const gmail = await getUncachableGmailClient();
-  
-  const response = await gmail.users.labels.list({
-    userId: 'me',
+/**
+ * Download file content, only if it's within the Investment Library.
+ */
+export async function downloadDriveFile(fileId: string): Promise<{ buffer: Buffer; mimeType: string; name: string }> {
+  const drive = await getDriveClient();
+
+  // Security: ensure file is within Investment Library
+  await assertFileWithinInvestmentLibrary(drive, fileId);
+
+  const meta = await drive.files.get({
+    fileId,
+    fields: 'name, mimeType',
   });
 
-  const labels = response.data.labels || [];
-  
-  const fullLabels = await Promise.all(
-    labels.map(async (label) => {
-      const full = await gmail.users.labels.get({
-        userId: 'me',
-        id: label.id!,
-      });
-      
-      return {
-        id: full.data.id!,
-        name: full.data.name!,
-        type: full.data.type || 'user',
-        messagesTotal: full.data.messagesTotal || 0,
-        messagesUnread: full.data.messagesUnread || 0,
-      };
-    })
+  const response = await drive.files.get(
+    { fileId, alt: 'media' },
+    { responseType: 'arraybuffer' }
   );
 
-  return fullLabels;
-}
-
-export async function sendEmail(to: string, subject: string, body: string): Promise<string> {
-  const gmail = await getUncachableGmailClient();
-  
-  const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
-  const messageParts = [
-    `To: ${to}`,
-    `Subject: ${utf8Subject}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/html; charset=utf-8',
-    '',
-    body,
-  ];
-  const message = messageParts.join('\n');
-  
-  const encodedMessage = Buffer.from(message)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-
-  const response = await gmail.users.messages.send({
-    userId: 'me',
-    requestBody: {
-      raw: encodedMessage,
-    },
-  });
-
-  return response.data.id!;
-}
-
-export async function markAsRead(messageId: string): Promise<void> {
-  const gmail = await getUncachableGmailClient();
-  
-  await gmail.users.messages.modify({
-    userId: 'me',
-    id: messageId,
-    requestBody: {
-      removeLabelIds: ['UNREAD'],
-    },
-  });
-}
-
-export async function searchMessages(query: string, maxResults: number = 20): Promise<GmailMessage[]> {
-  return listMessages(query, maxResults);
+  return {
+    buffer: Buffer.from(response.data as ArrayBuffer),
+    mimeType: meta.data.mimeType || 'application/octet-stream',
+    name: meta.data.name || 'download',
+  };
 }

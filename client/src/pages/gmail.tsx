@@ -1,477 +1,340 @@
 import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Label } from "@/components/ui/label";
-import { useToast } from "@/hooks/use-toast";
-import { queryClient, apiRequest } from "@/lib/queryClient";
 import {
-  Mail,
-  Inbox,
-  Send,
+  Library,
   Search,
   RefreshCw,
   Loader2,
-  Paperclip,
-  Star,
-  Clock,
+  Folder,
+  FileText,
+  FileSpreadsheet,
+  FileImage,
+  File,
   ChevronRight,
-  X,
-  MailOpen,
+  ArrowLeft,
+  Download,
+  ExternalLink,
   AlertCircle,
+  HardDrive,
+  Shield,
 } from "lucide-react";
 
-interface GmailMessage {
-  id: string;
-  threadId: string;
-  snippet: string;
-  subject: string;
-  from: string;
-  to: string;
-  date: string;
-  labelIds: string[];
-  isUnread: boolean;
-  hasAttachment: boolean;
-}
-
-interface GmailLabel {
+interface DriveFile {
   id: string;
   name: string;
-  type: string;
-  messagesTotal: number;
-  messagesUnread: number;
+  mimeType: string;
+  size: number;
+  modifiedTime: string;
+  webViewLink: string;
+  iconLink: string;
+  isFolder: boolean;
+}
+
+interface BreadcrumbItem {
+  id: string | null; // null = Investment Library root
+  name: string;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return "--";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let size = bytes;
+  while (size >= 1024 && i < units.length - 1) {
+    size /= 1024;
+    i++;
+  }
+  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
 function formatDate(dateString: string): string {
   if (!dateString) return "";
   const date = new Date(dateString);
-  const now = new Date();
-  const diff = now.getTime() - date.getTime();
-  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  
-  if (days === 0) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } else if (days === 1) {
-    return "Yesterday";
-  } else if (days < 7) {
-    return date.toLocaleDateString([], { weekday: "short" });
-  } else {
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
-  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
-function extractSenderName(from: string): string {
-  const match = from.match(/^([^<]+)/);
-  if (match) {
-    return match[1].trim().replace(/"/g, "");
-  }
-  return from.split("@")[0];
+function getFileIcon(mimeType: string, isFolder: boolean) {
+  if (isFolder) return <Folder className="h-5 w-5 text-blue-500" />;
+  if (mimeType.includes("spreadsheet") || mimeType.includes("excel") || mimeType.includes("csv"))
+    return <FileSpreadsheet className="h-5 w-5 text-green-600" />;
+  if (mimeType.includes("document") || mimeType.includes("word") || mimeType.includes("pdf") || mimeType.includes("text"))
+    return <FileText className="h-5 w-5 text-red-500" />;
+  if (mimeType.includes("image") || mimeType.includes("png") || mimeType.includes("jpeg"))
+    return <FileImage className="h-5 w-5 text-purple-500" />;
+  if (mimeType.includes("presentation") || mimeType.includes("powerpoint"))
+    return <FileText className="h-5 w-5 text-orange-500" />;
+  return <File className="h-5 w-5 text-muted-foreground" />;
 }
 
-export default function GmailPage() {
-  const { toast } = useToast();
+export default function InvestmentLibraryPage() {
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [breadcrumbs, setBreadcrumbs] = useState<BreadcrumbItem[]>([
+    { id: null, name: "Investment Library" },
+  ]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedMessage, setSelectedMessage] = useState<GmailMessage | null>(null);
-  const [showCompose, setShowCompose] = useState(false);
-  const [composeTo, setComposeTo] = useState("");
-  const [composeSubject, setComposeSubject] = useState("");
-  const [composeBody, setComposeBody] = useState("");
-  const [activeLabel, setActiveLabel] = useState("INBOX");
+  const [isSearching, setIsSearching] = useState(false);
 
-  const { data: messagesData, isLoading: messagesLoading, error: messagesError, refetch: refetchMessages } = useQuery<{
-    messages: GmailMessage[];
-  }>({
-    queryKey: ["/api/gmail/messages", activeLabel],
+  const {
+    data: filesData,
+    isLoading: filesLoading,
+    error: filesError,
+    refetch: refetchFiles,
+  } = useQuery<{ files: DriveFile[] }>({
+    queryKey: ["/api/drive/files", currentFolderId],
     queryFn: async () => {
-      const labelQuery = activeLabel !== "ALL" ? `label:${activeLabel}` : "";
-      const res = await fetch(`/api/gmail/messages?q=${encodeURIComponent(labelQuery)}&maxResults=30`);
-      if (!res.ok) throw new Error("Failed to fetch messages");
+      const params = currentFolderId ? `?folderId=${encodeURIComponent(currentFolderId)}` : "";
+      const res = await fetch(`/api/drive/files${params}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || "Failed to fetch files");
+      }
       return res.json();
     },
   });
 
-  const { data: labelsData, isLoading: labelsLoading } = useQuery<{
-    labels: GmailLabel[];
-  }>({
-    queryKey: ["/api/gmail/labels"],
-  });
-
-  const { data: messageDetail, isLoading: messageDetailLoading } = useQuery<{
-    message: GmailMessage;
-    body: string;
-  }>({
-    queryKey: ["/api/gmail/messages", selectedMessage?.id],
-    enabled: !!selectedMessage,
-  });
-
-  const searchMutation = useMutation({
-    mutationFn: async (query: string) => {
-      const res = await fetch(`/api/gmail/search?q=${encodeURIComponent(query)}&maxResults=30`);
+  const {
+    data: searchData,
+    isLoading: searchLoading,
+    refetch: refetchSearch,
+  } = useQuery<{ files: DriveFile[] }>({
+    queryKey: ["/api/drive/search", searchQuery],
+    queryFn: async () => {
+      const res = await fetch(`/api/drive/search?q=${encodeURIComponent(searchQuery)}`);
       if (!res.ok) throw new Error("Search failed");
       return res.json();
     },
-    onSuccess: (data) => {
-      queryClient.setQueryData(["/api/gmail/messages", activeLabel], data);
-    },
-  });
-
-  const markAsReadMutation = useMutation({
-    mutationFn: async (messageId: string) => {
-      return apiRequest("POST", `/api/gmail/messages/${messageId}/read`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/gmail/messages"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/gmail/labels"] });
-    },
-  });
-
-  const sendEmailMutation = useMutation({
-    mutationFn: async (data: { to: string; subject: string; body: string }) => {
-      return apiRequest("POST", "/api/gmail/send", data);
-    },
-    onSuccess: () => {
-      setShowCompose(false);
-      setComposeTo("");
-      setComposeSubject("");
-      setComposeBody("");
-      toast({
-        title: "Email sent",
-        description: "Your email has been sent successfully.",
-      });
-      queryClient.invalidateQueries({ queryKey: ["/api/gmail/messages"] });
-    },
-    onError: (error: Error) => {
-      toast({
-        variant: "destructive",
-        title: "Failed to send email",
-        description: error.message,
-      });
-    },
+    enabled: false,
   });
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (searchQuery.trim()) {
-      searchMutation.mutate(searchQuery);
+      setIsSearching(true);
+      refetchSearch();
     }
   };
 
-  const handleMessageClick = (message: GmailMessage) => {
-    setSelectedMessage(message);
-    if (message.isUnread) {
-      markAsReadMutation.mutate(message.id);
+  const clearSearch = () => {
+    setSearchQuery("");
+    setIsSearching(false);
+  };
+
+  const navigateToFolder = (file: DriveFile) => {
+    setCurrentFolderId(file.id);
+    setBreadcrumbs((prev) => [...prev, { id: file.id, name: file.name }]);
+    setIsSearching(false);
+    setSearchQuery("");
+  };
+
+  const navigateToBreadcrumb = (index: number) => {
+    const crumb = breadcrumbs[index];
+    setCurrentFolderId(crumb.id);
+    setBreadcrumbs((prev) => prev.slice(0, index + 1));
+    setIsSearching(false);
+    setSearchQuery("");
+  };
+
+  const goBack = () => {
+    if (breadcrumbs.length > 1) {
+      navigateToBreadcrumb(breadcrumbs.length - 2);
     }
   };
 
-  const handleSendEmail = () => {
-    if (!composeTo || !composeSubject || !composeBody) {
-      toast({
-        variant: "destructive",
-        title: "Missing fields",
-        description: "Please fill in all fields before sending.",
-      });
-      return;
-    }
-    sendEmailMutation.mutate({ to: composeTo, subject: composeSubject, body: composeBody });
-  };
-
-  const messages = messagesData?.messages || [];
-  const labels = labelsData?.labels || [];
-  
-  const importantLabels = labels.filter(l => 
-    ["INBOX", "SENT", "DRAFT", "STARRED", "IMPORTANT", "SPAM", "TRASH"].includes(l.id)
-  );
-
-  const inboxLabel = labels.find(l => l.id === "INBOX");
-  const unreadCount = inboxLabel?.messagesUnread || 0;
+  const displayFiles = isSearching ? searchData?.files || [] : filesData?.files || [];
+  const loading = isSearching ? searchLoading : filesLoading;
+  const folderCount = displayFiles.filter((f) => f.isFolder).length;
+  const fileCount = displayFiles.filter((f) => !f.isFolder).length;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
-            <Mail className="h-8 w-8" />
-            Gmail
+            <Library className="h-8 w-8" />
+            Investment Library
           </h1>
-          <p className="text-muted-foreground mt-1">
-            Manage your investment-related emails
+          <p className="text-muted-foreground mt-1 flex items-center gap-1.5">
+            <Shield className="h-3.5 w-3.5" />
+            Read-only access to the Investment Library folder in Google Drive
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            onClick={() => refetchMessages()}
-            disabled={messagesLoading}
-            data-testid="button-refresh-gmail"
-          >
-            <RefreshCw className={`h-4 w-4 mr-2 ${messagesLoading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
-          <Button onClick={() => setShowCompose(true)} data-testid="button-compose">
-            <Send className="h-4 w-4 mr-2" />
-            Compose
-          </Button>
-        </div>
+        <Button
+          variant="outline"
+          onClick={() => {
+            if (isSearching) {
+              clearSearch();
+            }
+            refetchFiles();
+          }}
+          disabled={loading}
+        >
+          <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
       </div>
 
-      <div className="flex gap-6">
-        <Card className="w-56 shrink-0" data-testid="card-labels">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <Inbox className="h-4 w-4" />
-              Labels
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-1 p-2">
-            {labelsLoading ? (
-              <div className="flex justify-center py-4">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-              </div>
-            ) : (
-              <>
-                {importantLabels.map((label) => (
-                  <Button
-                    key={label.id}
-                    variant={activeLabel === label.id ? "secondary" : "ghost"}
-                    className="w-full justify-between h-9"
-                    onClick={() => setActiveLabel(label.id)}
-                    data-testid={`button-label-${label.id.toLowerCase()}`}
-                  >
-                    <span className="truncate">{label.name}</span>
-                    {label.messagesUnread > 0 && (
-                      <Badge variant="secondary" className="ml-2 text-xs">
-                        {label.messagesUnread}
-                      </Badge>
-                    )}
-                  </Button>
-                ))}
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-        <div className="flex-1 space-y-4">
-          <form onSubmit={handleSearch} className="flex gap-2">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search emails..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-10"
-                data-testid="input-search-gmail"
-              />
-            </div>
-            <Button type="submit" disabled={searchMutation.isPending} data-testid="button-search-gmail">
-              {searchMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                "Search"
-              )}
+      <div className="flex gap-4 items-center">
+        {breadcrumbs.length > 1 && !isSearching && (
+          <Button variant="ghost" size="icon" onClick={goBack}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+        )}
+        <form onSubmit={handleSearch} className="flex gap-2 flex-1">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search files in Investment Library..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+          <Button type="submit" disabled={searchLoading || !searchQuery.trim()}>
+            {searchLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Search"}
+          </Button>
+          {isSearching && (
+            <Button variant="outline" onClick={clearSearch}>
+              Clear
             </Button>
-          </form>
+          )}
+        </form>
+      </div>
 
-          <Card data-testid="card-messages">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-sm font-medium">
-                  {activeLabel === "INBOX" ? "Inbox" : activeLabel}
-                  {unreadCount > 0 && activeLabel === "INBOX" && (
-                    <Badge variant="default" className="ml-2">
-                      {unreadCount} unread
-                    </Badge>
+      {!isSearching && (
+        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+          <HardDrive className="h-3.5 w-3.5 mr-1" />
+          {breadcrumbs.map((crumb, i) => (
+            <span key={i} className="flex items-center gap-1">
+              {i > 0 && <ChevronRight className="h-3 w-3" />}
+              <button
+                onClick={() => navigateToBreadcrumb(i)}
+                className={`hover:text-foreground transition-colors ${
+                  i === breadcrumbs.length - 1 ? "text-foreground font-medium" : ""
+                }`}
+              >
+                {crumb.name}
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-medium">
+              {isSearching ? (
+                <>
+                  Search Results
+                  <Badge variant="secondary" className="ml-2">
+                    {displayFiles.length} found
+                  </Badge>
+                </>
+              ) : (
+                <>
+                  {breadcrumbs[breadcrumbs.length - 1]?.name || "Investment Library"}
+                  {!loading && (
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      {folderCount > 0 && `${folderCount} folder${folderCount > 1 ? "s" : ""}`}
+                      {folderCount > 0 && fileCount > 0 && ", "}
+                      {fileCount > 0 && `${fileCount} file${fileCount > 1 ? "s" : ""}`}
+                    </span>
                   )}
-                </CardTitle>
-                <span className="text-xs text-muted-foreground">
-                  {messages.length} messages
-                </span>
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              {messagesError ? (
-                <div className="flex flex-col items-center justify-center py-16 gap-4 px-6">
-                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-destructive/10">
-                    <AlertCircle className="h-8 w-8 text-destructive" />
-                  </div>
-                  <div className="text-center space-y-2 max-w-md">
-                    <p className="font-medium">Gmail Connection Required</p>
-                    <p className="text-sm text-muted-foreground">
-                      Unable to connect to Gmail. This feature requires a Google OAuth connection to be configured
-                      in your environment. The Gmail API needs valid OAuth credentials (access token) to read and send emails.
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-3">
-                      If running on Replit, enable the Gmail connector in the Connections panel. Otherwise, ensure the
-                      required environment variables (<code className="bg-muted px-1 py-0.5 rounded text-xs">REPLIT_CONNECTORS_HOSTNAME</code>,{" "}
-                      <code className="bg-muted px-1 py-0.5 rounded text-xs">REPL_IDENTITY</code>) are set.
-                    </p>
-                  </div>
-                </div>
-              ) : messagesLoading ? (
-                <div className="flex justify-center py-12">
-                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                </div>
-              ) : messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 gap-4">
-                  <MailOpen className="h-12 w-12 text-muted-foreground" />
-                  <p className="text-muted-foreground">No emails found</p>
-                </div>
-              ) : (
-                <div className="divide-y">
-                  {messages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`flex items-center gap-4 p-4 hover-elevate cursor-pointer ${
-                        message.isUnread ? "bg-primary/5" : ""
-                      }`}
-                      onClick={() => handleMessageClick(message)}
-                      data-testid={`row-message-${message.id}`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className={`font-medium truncate ${message.isUnread ? "font-semibold" : ""}`}>
-                            {extractSenderName(message.from)}
-                          </span>
-                          {message.hasAttachment && (
-                            <Paperclip className="h-3 w-3 text-muted-foreground shrink-0" />
-                          )}
-                          {message.labelIds?.includes("STARRED") && (
-                            <Star className="h-3 w-3 text-yellow-500 fill-yellow-500 shrink-0" />
-                          )}
-                        </div>
-                        <p className={`text-sm truncate ${message.isUnread ? "font-medium" : "text-muted-foreground"}`}>
-                          {message.subject || "(No subject)"}
-                        </p>
-                        <p className="text-xs text-muted-foreground truncate mt-0.5">
-                          {message.snippet}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-xs text-muted-foreground">
-                          {formatDate(message.date)}
-                        </span>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-
-      <Dialog open={!!selectedMessage} onOpenChange={(open) => !open && setSelectedMessage(null)}>
-        <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
-          <DialogHeader>
-            <DialogTitle className="pr-8">{selectedMessage?.subject || "(No subject)"}</DialogTitle>
-            <DialogDescription className="flex items-center gap-4 pt-2">
-              <span className="font-medium">{extractSenderName(selectedMessage?.from || "")}</span>
-              <span className="text-xs flex items-center gap-1">
-                <Clock className="h-3 w-3" />
-                {selectedMessage?.date}
-              </span>
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex-1 overflow-auto mt-4 p-4 bg-muted/30 rounded-lg">
-            {messageDetailLoading ? (
-              <div className="flex justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin" />
-              </div>
-            ) : (
-              <div 
-                className="prose dark:prose-invert max-w-none text-sm"
-                dangerouslySetInnerHTML={{ __html: messageDetail?.body || selectedMessage?.snippet || "" }}
-              />
-            )}
-          </div>
-          <div className="flex justify-end gap-2 pt-4">
-            <Button variant="outline" onClick={() => setSelectedMessage(null)}>
-              Close
-            </Button>
-            <Button onClick={() => {
-              setComposeTo(selectedMessage?.from?.match(/<(.+)>/)?.[1] || selectedMessage?.from || "");
-              setComposeSubject(`Re: ${selectedMessage?.subject || ""}`);
-              setComposeBody("");
-              setSelectedMessage(null);
-              setShowCompose(true);
-            }}>
-              Reply
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={showCompose} onOpenChange={setShowCompose}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Send className="h-5 w-5" />
-              Compose Email
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="to">To</Label>
-              <Input
-                id="to"
-                type="email"
-                placeholder="recipient@example.com"
-                value={composeTo}
-                onChange={(e) => setComposeTo(e.target.value)}
-                data-testid="input-compose-to"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="subject">Subject</Label>
-              <Input
-                id="subject"
-                placeholder="Email subject"
-                value={composeSubject}
-                onChange={(e) => setComposeSubject(e.target.value)}
-                data-testid="input-compose-subject"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="body">Message</Label>
-              <Textarea
-                id="body"
-                placeholder="Write your message..."
-                value={composeBody}
-                onChange={(e) => setComposeBody(e.target.value)}
-                className="min-h-[200px]"
-                data-testid="input-compose-body"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowCompose(false)}>
-              Cancel
-            </Button>
-            <Button 
-              onClick={handleSendEmail} 
-              disabled={sendEmailMutation.isPending}
-              data-testid="button-send-email"
-            >
-              {sendEmailMutation.isPending ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Sending...
-                </>
-              ) : (
-                <>
-                  <Send className="h-4 w-4 mr-2" />
-                  Send
                 </>
               )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {filesError ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-4 px-6">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-destructive/10">
+                <AlertCircle className="h-8 w-8 text-destructive" />
+              </div>
+              <div className="text-center space-y-2 max-w-md">
+                <p className="font-medium">Google Drive Connection Required</p>
+                <p className="text-sm text-muted-foreground">
+                  Unable to connect to Google Drive. This feature requires a Google OAuth connection
+                  and an "Investment Library" folder in your Google Drive.
+                </p>
+                <p className="text-xs text-muted-foreground mt-3">
+                  Ensure the Google connector is enabled in Replit and that a folder named
+                  "Investment Library" exists in your Drive.
+                </p>
+              </div>
+            </div>
+          ) : loading ? (
+            <div className="flex justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : displayFiles.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-4">
+              <Folder className="h-12 w-12 text-muted-foreground" />
+              <p className="text-muted-foreground">
+                {isSearching ? "No files match your search" : "This folder is empty"}
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y">
+              {displayFiles.map((file) => (
+                <div
+                  key={file.id}
+                  className={`flex items-center gap-4 p-4 hover-elevate ${
+                    file.isFolder ? "cursor-pointer" : ""
+                  }`}
+                  onClick={() => file.isFolder && navigateToFolder(file)}
+                >
+                  <div className="shrink-0">{getFileIcon(file.mimeType, file.isFolder)}</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{file.name}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {formatDate(file.modifiedTime)}
+                      {!file.isFolder && ` \u00B7 ${formatFileSize(file.size)}`}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {!file.isFolder && (
+                      <>
+                        {file.webViewLink && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              window.open(file.webViewLink, "_blank", "noopener,noreferrer");
+                            }}
+                            title="Open in Google Drive"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            window.open(`/api/drive/download/${file.id}`, "_blank");
+                          }}
+                          title="Download"
+                        >
+                          <Download className="h-4 w-4" />
+                        </Button>
+                      </>
+                    )}
+                    {file.isFolder && <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

@@ -21,7 +21,7 @@ import StressTestsPage from "@/pages/stress-tests";
 import ImportPage from "@/pages/import";
 import PortfolioManagePage from "@/pages/portfolio-manage";
 import DataRoomPage from "@/pages/data-room";
-import GmailPage from "@/pages/gmail";
+import InvestmentLibraryPage from "@/pages/gmail";
 import PortfolioBuilderPage from "@/pages/portfolio-builder";
 import StrategyLibraryPage from "@/pages/strategy-library";
 import FundAnalysisPage from "@/pages/fund-analysis";
@@ -47,7 +47,7 @@ function Router() {
       <ProtectedRoute path="/import" component={ImportPage} />
       <ProtectedRoute path="/portfolio/:id/manage" component={PortfolioManagePage} />
       <ProtectedRoute path="/data-room" component={DataRoomPage} />
-      <ProtectedRoute path="/gmail" component={GmailPage} />
+      <ProtectedRoute path="/gmail" component={InvestmentLibraryPage} />
       <ProtectedRoute path="/strategy-library" component={StrategyLibraryPage} />
       <ProtectedRoute path="/portfolio-builder" component={PortfolioBuilderPage} />
       <ProtectedRoute path="/fund-analysis" component={FundAnalysisPage} />

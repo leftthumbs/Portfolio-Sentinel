@@ -11,7 +11,7 @@ import { generateInvestmentMemo, analyzeDocumentContent } from "./memoGenerator"
 import { generateWordDocument, sanitizeFilename } from "./wordGenerator";
 import type { MemoTemplateType } from "@shared/schema";
 import { listOneDriveFiles, getOneDriveFileContent, searchOneDriveFiles } from "./onedrive";
-import { listMessages, getMessage, listLabels, sendEmail, markAsRead, searchMessages } from "./gmail";
+import { listDriveFiles, searchDriveFiles, getDriveFile, downloadDriveFile } from "./gmail";
 import { runBacktest } from "./backtester";
 import { optimizePortfolio } from "./optimizer";
 import { setupAuth } from "./auth";
@@ -1524,85 +1524,62 @@ export async function registerRoutes(
     }
   });
 
-  // Gmail routes
-  app.get("/api/gmail/messages", async (req, res) => {
+  // Investment Library (Google Drive) routes — scoped to Investment Library folder only
+  app.get("/api/drive/files", async (req, res) => {
     try {
-      const query = req.query.q as string | undefined;
-      const maxResults = parseInt(req.query.maxResults as string) || 20;
-      const messages = await listMessages(query, maxResults);
-      res.json({ messages });
+      const folderId = req.query.folderId as string | undefined;
+      const files = await listDriveFiles(folderId);
+      res.json({ files });
     } catch (error: any) {
-      console.error("Gmail list messages error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch emails" });
-    }
-  });
-
-  app.get("/api/gmail/messages/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const result = await getMessage(id);
-      res.json(result);
-    } catch (error: any) {
-      console.error("Gmail get message error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch email" });
-    }
-  });
-
-  app.get("/api/gmail/labels", async (req, res) => {
-    try {
-      const labels = await listLabels();
-      res.json({ labels });
-    } catch (error: any) {
-      console.error("Gmail list labels error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch labels" });
-    }
-  });
-
-  app.post("/api/gmail/messages/:id/read", async (req, res) => {
-    try {
-      const { id } = req.params;
-      await markAsRead(id);
-      res.json({ success: true });
-    } catch (error: any) {
-      console.error("Gmail mark as read error:", error);
-      res.status(500).json({ message: error.message || "Failed to mark as read" });
-    }
-  });
-
-  const sendEmailSchema = z.object({
-    to: z.string().email("Invalid email address"),
-    subject: z.string().min(1, "Subject is required"),
-    body: z.string().min(1, "Message body is required"),
-  });
-
-  app.post("/api/gmail/send", async (req, res) => {
-    try {
-      const parsed = sendEmailSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ message: parsed.error.errors[0].message });
+      console.error("Drive list files error:", error);
+      if (error.message?.includes('Access denied')) {
+        return res.status(403).json({ message: error.message });
       }
-
-      const { to, subject, body } = parsed.data;
-      const messageId = await sendEmail(to, subject, body);
-      res.status(201).json({ messageId });
-    } catch (error: any) {
-      console.error("Gmail send error:", error);
-      res.status(500).json({ message: error.message || "Failed to send email" });
+      res.status(500).json({ message: error.message || "Failed to list files" });
     }
   });
 
-  app.get("/api/gmail/search", async (req, res) => {
+  app.get("/api/drive/files/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const file = await getDriveFile(id);
+      res.json({ file });
+    } catch (error: any) {
+      console.error("Drive get file error:", error);
+      if (error.message?.includes('Access denied')) {
+        return res.status(403).json({ message: error.message });
+      }
+      res.status(500).json({ message: error.message || "Failed to get file" });
+    }
+  });
+
+  app.get("/api/drive/search", async (req, res) => {
     try {
       const query = req.query.q as string;
       if (!query) {
         return res.status(400).json({ message: "Search query is required" });
       }
-      const maxResults = parseInt(req.query.maxResults as string) || 20;
-      const messages = await searchMessages(query, maxResults);
-      res.json({ messages });
+      const files = await searchDriveFiles(query);
+      res.json({ files });
     } catch (error: any) {
-      console.error("Gmail search error:", error);
-      res.status(500).json({ message: error.message || "Failed to search emails" });
+      console.error("Drive search error:", error);
+      res.status(500).json({ message: error.message || "Failed to search files" });
+    }
+  });
+
+  app.get("/api/drive/download/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { buffer, mimeType, name } = await downloadDriveFile(id);
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(name)}"`);
+      res.send(buffer);
+    } catch (error: any) {
+      console.error("Drive download error:", error);
+      if (error.message?.includes('Access denied')) {
+        return res.status(403).json({ message: error.message });
+      }
+      res.status(500).json({ message: error.message || "Failed to download file" });
     }
   });
 
