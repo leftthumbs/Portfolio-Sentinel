@@ -96,6 +96,22 @@ export const stressTests = pgTable("stress_tests", {
   portfolioImpact: decimal("portfolio_impact", { precision: 10, scale: 6 }),
   impactAmount: decimal("impact_amount", { precision: 20, scale: 2 }),
   runDate: timestamp("run_date").defaultNow(),
+  // Enhanced scenario engine fields
+  regime: text("regime"),
+  scenarioCategory: text("scenario_category"),
+  commodityShock: decimal("commodity_shock", { precision: 8, scale: 4 }),
+  volatilityShock: decimal("volatility_shock", { precision: 8, scale: 4 }),
+  inflationShock: decimal("inflation_shock", { precision: 8, scale: 4 }),
+  liquidityShock: decimal("liquidity_shock", { precision: 8, scale: 4 }),
+  parametricVaR95: decimal("parametric_var_95", { precision: 10, scale: 6 }),
+  parametricVaR99: decimal("parametric_var_99", { precision: 10, scale: 6 }),
+  cvar95: decimal("cvar_95", { precision: 10, scale: 6 }),
+  cvar99: decimal("cvar_99", { precision: 10, scale: 6 }),
+  stressedValue: decimal("stressed_value", { precision: 20, scale: 2 }),
+  factorDecomposition: jsonb("factor_decomposition"),
+  assetImpacts: jsonb("asset_impacts"),
+  componentVaR: jsonb("component_var"),
+  monteCarloStats: jsonb("monte_carlo_scenario_stats"),
 });
 
 export const users = pgTable("users", {

@@ -18,6 +18,16 @@ import { setupAuth } from "./auth";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns } from "./riskCalculations";
+import {
+  ScenarioEngine,
+  holdingsToPortfolioHoldings,
+  HISTORICAL_SCENARIOS,
+  HYPOTHETICAL_SCENARIOS,
+  DEFAULT_FACTORS,
+  type ScenarioDefinition,
+  type ScenarioShock,
+  type PortfolioHolding,
+} from "./scenarioEngine";
 
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
@@ -61,6 +71,47 @@ const stressTestInputSchema = z.object({
   fxShock: z.number().min(-0.5).max(0.5),
   portfolioId: z.string().optional(),
   portfolioType: z.enum(["core", "custom"]).optional(),
+});
+
+const enhancedStressTestSchema = z.object({
+  scenario: z.object({
+    name: z.string().min(1),
+    description: z.string().optional().default(""),
+    category: z.enum(["historical", "hypothetical", "reverse", "monte_carlo"]).default("hypothetical"),
+    regime: z.enum(["expansion", "contraction", "crisis"]).optional(),
+    shocks: z.object({
+      equity: z.number().optional(),
+      rates: z.number().optional(),
+      credit: z.number().optional(),
+      fx: z.number().optional(),
+      commodity: z.number().optional(),
+      volatility: z.number().optional(),
+      inflation: z.number().optional(),
+      liquidity: z.number().optional(),
+    }),
+  }),
+  portfolioId: z.string().optional(),
+  portfolioType: z.enum(["core", "custom"]).optional(),
+  monteCarlo: z.boolean().optional().default(false),
+  numSimulations: z.number().min(100).max(10000).optional().default(1000),
+  fatTails: z.boolean().optional().default(true),
+  degreesOfFreedom: z.number().min(3).max(30).optional().default(5),
+});
+
+const reverseStressTestSchema = z.object({
+  targetLoss: z.number().min(-1).max(0),
+  portfolioId: z.string().optional(),
+  portfolioType: z.enum(["core", "custom"]).optional(),
+  direction: z.object({
+    equity: z.number().optional(),
+    rates: z.number().optional(),
+    credit: z.number().optional(),
+    fx: z.number().optional(),
+    commodity: z.number().optional(),
+    volatility: z.number().optional(),
+    inflation: z.number().optional(),
+    liquidity: z.number().optional(),
+  }).optional(),
 });
 
 export async function registerRoutes(
@@ -1060,6 +1111,282 @@ export async function registerRoutes(
       res.status(201).json(stressTest);
     } catch (error) {
       console.error("Create stress test error:", error);
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  // ─── Enhanced Scenario Engine Routes ────────────────────────────────────
+
+  /** Helper: resolve portfolio holdings for scenario engine */
+  async function resolvePortfolioForScenario(
+    reqPortfolioId?: string,
+    portfolioType?: string
+  ): Promise<{ holdings: PortfolioHolding[]; portfolioValue: number; portfolioId: string }> {
+    if (portfolioType === "custom" && reqPortfolioId) {
+      const customPortfolio = await storage.getCustomPortfolio(reqPortfolioId);
+      if (!customPortfolio) throw new Error("Custom portfolio not found");
+
+      const items = await storage.getCustomPortfolioItems(reqPortfolioId);
+      const backtests = await storage.getBacktestResults(reqPortfolioId);
+      const latestBacktest = backtests.length > 0 ? backtests[0] : null;
+      const portfolioValue = latestBacktest?.finalValue ? parseFloat(latestBacktest.finalValue) : 1000000;
+
+      return {
+        holdings: holdingsToPortfolioHoldings(items),
+        portfolioValue,
+        portfolioId: reqPortfolioId,
+      };
+    } else {
+      const portfolioId = reqPortfolioId || await getDefaultPortfolioId();
+      const portfolio = await storage.getPortfolio(portfolioId);
+      if (!portfolio) throw new Error("Portfolio not found");
+
+      const dbHoldings = await storage.getHoldings(portfolioId);
+      return {
+        holdings: holdingsToPortfolioHoldings(dbHoldings),
+        portfolioValue: parseFloat(portfolio.totalValue),
+        portfolioId,
+      };
+    }
+  }
+
+  /** Get available factors and preset scenarios */
+  app.get("/api/scenario-engine/config", (_req, res) => {
+    res.json({
+      factors: DEFAULT_FACTORS,
+      historicalScenarios: HISTORICAL_SCENARIOS,
+      hypotheticalScenarios: HYPOTHETICAL_SCENARIOS,
+    });
+  });
+
+  /** Run an enhanced multi-factor stress test */
+  app.post("/api/scenario-engine/stress-test", async (req, res) => {
+    try {
+      const validation = enhancedStressTestSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Invalid input",
+          errors: validation.error.flatten().fieldErrors,
+        });
+      }
+
+      const { scenario, portfolioId: reqPortfolioId, portfolioType, monteCarlo, numSimulations, fatTails, degreesOfFreedom } = validation.data;
+
+      const { holdings, portfolioValue, portfolioId } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const scenarioDef: ScenarioDefinition = {
+        name: scenario.name,
+        description: scenario.description || "",
+        category: scenario.category,
+        regime: scenario.regime,
+        shocks: scenario.shocks,
+      };
+
+      let result;
+      if (monteCarlo) {
+        result = engine.runMonteCarloScenario(holdings, scenarioDef, portfolioValue, {
+          numSimulations,
+          fatTails,
+          degreesOfFreedom,
+        });
+      } else {
+        result = engine.runScenario(holdings, scenarioDef, portfolioValue);
+      }
+
+      // Persist to DB
+      const stressTest = await storage.createStressTest({
+        portfolioId,
+        scenarioName: scenario.name,
+        scenarioType: scenario.category,
+        description: result.scenarioDescription,
+        equityShock: (scenario.shocks.equity ?? 0).toString(),
+        rateShock: (scenario.shocks.rates ?? 0).toString(),
+        creditSpreadShock: (scenario.shocks.credit ?? 0).toString(),
+        fxShock: (scenario.shocks.fx ?? 0).toString(),
+        portfolioImpact: result.totalImpact.toFixed(6),
+        impactAmount: result.impactAmount.toFixed(2),
+        regime: result.regime || null,
+        scenarioCategory: result.scenarioCategory,
+        commodityShock: (scenario.shocks.commodity ?? 0).toString(),
+        volatilityShock: (scenario.shocks.volatility ?? 0).toString(),
+        inflationShock: (scenario.shocks.inflation ?? 0).toString(),
+        liquidityShock: (scenario.shocks.liquidity ?? 0).toString(),
+        parametricVaR95: result.parametricVaR95.toFixed(6),
+        parametricVaR99: result.parametricVaR99.toFixed(6),
+        cvar95: result.cvar95.toFixed(6),
+        cvar99: result.cvar99.toFixed(6),
+        stressedValue: result.stressedValue.toFixed(2),
+        factorDecomposition: result.factorImpacts,
+        assetImpacts: result.assetImpacts,
+        componentVaR: result.componentVaR,
+        monteCarloStats: result.monteCarloStats || null,
+      });
+
+      res.status(201).json({ stressTest, result });
+    } catch (error: any) {
+      console.error("Enhanced stress test error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  /** Reverse stress test: find shocks that cause a target loss */
+  app.post("/api/scenario-engine/reverse-stress-test", async (req, res) => {
+    try {
+      const validation = reverseStressTestSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Invalid input",
+          errors: validation.error.flatten().fieldErrors,
+        });
+      }
+
+      const { targetLoss, portfolioId: reqPortfolioId, portfolioType, direction } = validation.data;
+
+      const { holdings, portfolioValue, portfolioId } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const result = engine.reverseStressTest(holdings, targetLoss, portfolioValue, direction);
+
+      // Save the reverse stress test result
+      const shocks = result.requiredShocks;
+      await storage.createStressTest({
+        portfolioId,
+        scenarioName: `Reverse: ${(targetLoss * 100).toFixed(0)}% loss`,
+        scenarioType: "reverse",
+        description: result.scenarioDescription,
+        equityShock: (shocks.equity ?? 0).toString(),
+        rateShock: (shocks.rates ?? 0).toString(),
+        creditSpreadShock: (shocks.credit ?? 0).toString(),
+        fxShock: (shocks.fx ?? 0).toString(),
+        portfolioImpact: result.achievedLoss.toFixed(6),
+        impactAmount: (portfolioValue * result.achievedLoss).toFixed(2),
+        regime: "crisis",
+        scenarioCategory: "reverse",
+        commodityShock: (shocks.commodity ?? 0).toString(),
+        volatilityShock: (shocks.volatility ?? 0).toString(),
+        inflationShock: (shocks.inflation ?? 0).toString(),
+        liquidityShock: (shocks.liquidity ?? 0).toString(),
+      });
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Reverse stress test error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  /** Compare multiple scenarios for a portfolio */
+  app.post("/api/scenario-engine/compare", async (req, res) => {
+    try {
+      const schema = z.object({
+        scenarios: z.array(z.object({
+          name: z.string(),
+          description: z.string().optional().default(""),
+          category: z.enum(["historical", "hypothetical", "reverse", "monte_carlo"]).default("hypothetical"),
+          regime: z.enum(["expansion", "contraction", "crisis"]).optional(),
+          shocks: z.object({
+            equity: z.number().optional(),
+            rates: z.number().optional(),
+            credit: z.number().optional(),
+            fx: z.number().optional(),
+            commodity: z.number().optional(),
+            volatility: z.number().optional(),
+            inflation: z.number().optional(),
+            liquidity: z.number().optional(),
+          }),
+        })).min(1).max(20),
+        portfolioId: z.string().optional(),
+        portfolioType: z.enum(["core", "custom"]).optional(),
+      });
+
+      const validation = schema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Invalid input",
+          errors: validation.error.flatten().fieldErrors,
+        });
+      }
+
+      const { scenarios, portfolioId: reqPortfolioId, portfolioType } = validation.data;
+
+      const { holdings, portfolioValue } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const scenarioDefs: ScenarioDefinition[] = scenarios.map(s => ({
+        name: s.name,
+        description: s.description || "",
+        category: s.category,
+        regime: s.regime,
+        shocks: s.shocks,
+      }));
+
+      const result = engine.compareScenarios(holdings, scenarioDefs, portfolioValue);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Scenario comparison error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  /** Run all preset scenarios at once */
+  app.post("/api/scenario-engine/run-all-presets", async (req, res) => {
+    try {
+      const schema = z.object({
+        portfolioId: z.string().optional(),
+        portfolioType: z.enum(["core", "custom"]).optional(),
+      });
+
+      const validation = schema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ message: "Invalid input" });
+      }
+
+      const { portfolioId: reqPortfolioId, portfolioType } = validation.data;
+
+      const { holdings, portfolioValue } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const result = engine.runAllPresets(holdings, portfolioValue);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Run all presets error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
       res.status(500).json({ message: "Internal server error" });
     }
   });
