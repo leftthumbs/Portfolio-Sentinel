@@ -294,12 +294,22 @@ export default function GmailPage() {
             </CardHeader>
             <CardContent className="p-0">
               {messagesError ? (
-                <div className="flex flex-col items-center justify-center py-12 gap-4">
-                  <AlertCircle className="h-12 w-12 text-destructive" />
-                  <p className="text-muted-foreground">Failed to load emails</p>
-                  <p className="text-sm text-muted-foreground">
-                    Make sure your Gmail account is connected
-                  </p>
+                <div className="flex flex-col items-center justify-center py-16 gap-4 px-6">
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-destructive/10">
+                    <AlertCircle className="h-8 w-8 text-destructive" />
+                  </div>
+                  <div className="text-center space-y-2 max-w-md">
+                    <p className="font-medium">Gmail Connection Required</p>
+                    <p className="text-sm text-muted-foreground">
+                      Unable to connect to Gmail. This feature requires a Google OAuth connection to be configured
+                      in your environment. The Gmail API needs valid OAuth credentials (access token) to read and send emails.
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-3">
+                      If running on Replit, enable the Gmail connector in the Connections panel. Otherwise, ensure the
+                      required environment variables (<code className="bg-muted px-1 py-0.5 rounded text-xs">REPLIT_CONNECTORS_HOSTNAME</code>,{" "}
+                      <code className="bg-muted px-1 py-0.5 rounded text-xs">REPL_IDENTITY</code>) are set.
+                    </p>
+                  </div>
                 </div>
               ) : messagesLoading ? (
                 <div className="flex justify-center py-12">

@@ -14,24 +14,32 @@ async function getAccessToken() {
     ? 'depl ' + process.env.WEB_REPL_RENEWAL 
     : null;
 
-  if (!xReplitToken) {
-    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
+  if (!hostname) {
+    throw new Error('Gmail not configured: REPLIT_CONNECTORS_HOSTNAME environment variable is not set. Enable the Gmail connector in your Replit project settings.');
   }
 
-  connectionSettings = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=google-mail',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X_REPLIT_TOKEN': xReplitToken
-      }
-    }
-  ).then(res => res.json()).then(data => data.items?.[0]);
+  if (!xReplitToken) {
+    throw new Error('Gmail not configured: authentication token not found. Ensure REPL_IDENTITY or WEB_REPL_RENEWAL environment variables are set.');
+  }
 
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings.settings?.oauth?.credentials?.access_token;
+  try {
+    connectionSettings = await fetch(
+      'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=google-mail',
+      {
+        headers: {
+          'Accept': 'application/json',
+          'X_REPLIT_TOKEN': xReplitToken
+        }
+      }
+    ).then(res => res.json()).then(data => data.items?.[0]);
+  } catch (fetchError) {
+    throw new Error('Gmail not configured: failed to reach connector service. Check that REPLIT_CONNECTORS_HOSTNAME is correct.');
+  }
+
+  const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
 
   if (!connectionSettings || !accessToken) {
-    throw new Error('Gmail not connected');
+    throw new Error('Gmail not connected: no OAuth access token found. Connect your Gmail account in the Replit Connections panel.');
   }
   return accessToken;
 }
