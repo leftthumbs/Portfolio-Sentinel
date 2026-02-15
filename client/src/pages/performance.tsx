@@ -1,37 +1,12 @@
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
-import { AlertTriangle, TrendingUp, Activity, Target, Plus, X, Layers, ChevronRight } from "lucide-react";
+import { AlertTriangle, TrendingUp, Activity, Target } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { MetricCard } from "@/components/metric-card";
 import { ChartSkeleton, MetricCardSkeleton } from "@/components/loading-skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-  DropdownMenuSeparator,
-  DropdownMenuLabel,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-  DialogFooter,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
 import {
   LineChart,
   Line,
@@ -48,18 +23,11 @@ import {
   Legend,
 } from "recharts";
 import type { Portfolio, PerformanceHistory, Benchmark, BenchmarkReturn } from "@shared/schema";
-import { queryClient, apiRequest } from "@/lib/queryClient";
-import { useToast } from "@/hooks/use-toast";
-
-interface SelectedBenchmarkData {
-  benchmark: Benchmark;
-  returns: BenchmarkReturn[];
-}
 
 interface PerformanceData {
   portfolio: Portfolio;
   performanceHistory: PerformanceHistory[];
-  selectedBenchmarks: SelectedBenchmarkData[];
+  selectedBenchmarks: Array<{ benchmark: Benchmark; returns: BenchmarkReturn[] }>;
   metrics: {
     totalReturn: number;
     annualizedReturn: number;
@@ -70,10 +38,6 @@ interface PerformanceData {
     positivedays: number;
     totalDays: number;
   };
-}
-
-interface BenchmarksData {
-  benchmarks: Benchmark[];
 }
 
 function formatCurrency(value: number | string): string {
@@ -96,18 +60,9 @@ function formatDateFull(date: string | Date): string {
   return new Date(date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-const BENCHMARK_COLORS = [
-  "#3b82f6",
-  "#10b981", 
-  "#f59e0b",
-  "#ec4899",
-  "#8b5cf6",
-  "#14b8a6",
-];
 
 export default function PerformancePage() {
-  const { toast } = useToast();
-  const { selectedPortfolioId, selectedPortfolioType, selectedTimePeriod } = usePortfolio();
+  const { selectedPortfolioId, selectedPortfolioType, selectedTimePeriod, selectedBenchmarkId, selectedBenchmark } = usePortfolio();
 
   // Build performance URL with timePeriod for period-aware benchmark calculations
   const buildPerformanceUrl = () => {
@@ -134,65 +89,33 @@ export default function PerformancePage() {
     },
   });
 
-  const { data: benchmarksData } = useQuery<BenchmarksData>({
-    queryKey: ["/api/benchmarks"],
-  });
+  // Fetch benchmark returns for the globally selected benchmark (from sidebar)
+  const isCompositeBenchmark = selectedBenchmark?.isComposite === true;
+  const benchmarkApiId = isCompositeBenchmark && selectedBenchmarkId?.startsWith("composite-")
+    ? selectedBenchmarkId.replace("composite-", "")
+    : selectedBenchmarkId;
 
-  const addBenchmarkMutation = useMutation({
-    mutationFn: async (benchmarkId: string) => {
-      await apiRequest("POST", `/api/portfolios/${data?.portfolio?.id}/benchmarks`, {
-        benchmarkId,
-        isPrimary: false,
-      });
+  const { data: globalBenchmarkReturns } = useQuery<{ returns: any[] }>({
+    queryKey: [
+      isCompositeBenchmark ? "/api/composite-benchmarks" : "/api/benchmarks",
+      benchmarkApiId,
+      "returns",
+      selectedTimePeriod,
+    ],
+    queryFn: async () => {
+      if (!benchmarkApiId) return { returns: [] };
+      const baseUrl = isCompositeBenchmark
+        ? `/api/composite-benchmarks/${benchmarkApiId}/returns`
+        : `/api/benchmarks/${benchmarkApiId}/returns`;
+      const params = new URLSearchParams();
+      if (selectedTimePeriod) params.set("timePeriod", selectedTimePeriod);
+      const qs = params.toString();
+      const url = qs ? `${baseUrl}?${qs}` : baseUrl;
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) return { returns: [] };
+      return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/performance"] });
-      toast({ title: "Benchmark added", description: "Benchmark has been added to comparison" });
-    },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to add benchmark", variant: "destructive" });
-    },
-  });
-
-  const removeBenchmarkMutation = useMutation({
-    mutationFn: async (benchmarkId: string) => {
-      await apiRequest("DELETE", `/api/portfolios/${data?.portfolio?.id}/benchmarks/${benchmarkId}`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/performance"] });
-      toast({ title: "Benchmark removed", description: "Benchmark has been removed from comparison" });
-    },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to remove benchmark", variant: "destructive" });
-    },
-  });
-
-  const [compositeDialogOpen, setCompositeDialogOpen] = useState(false);
-  const [compositeName, setCompositeName] = useState("");
-  const [compositeComponents, setCompositeComponents] = useState<{ benchmarkId: string; name: string; weight: number }[]>([]);
-
-  const createCompositeMutation = useMutation({
-    mutationFn: async (data: { name: string; components: { benchmarkId: string; weight: number }[] }) => {
-      return await apiRequest("POST", "/api/composite-benchmarks", {
-        name: data.name,
-        color: "#" + Math.floor(Math.random()*16777215).toString(16),
-        components: data.components.map(c => ({ benchmarkId: c.benchmarkId, weight: c.weight })),
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/composite-benchmarks"] });
-      toast({ title: "Composite benchmark created", description: "Your custom benchmark has been created" });
-      setCompositeDialogOpen(false);
-      setCompositeName("");
-      setCompositeComponents([]);
-    },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to create composite benchmark", variant: "destructive" });
-    },
-  });
-
-  const { data: compositeBenchmarksData } = useQuery<{ compositeBenchmarks: any[] }>({
-    queryKey: ["/api/composite-benchmarks"],
+    enabled: !!benchmarkApiId,
   });
 
   if (isLoading) {
@@ -240,20 +163,20 @@ export default function PerformancePage() {
     );
   }
 
-  const { portfolio, performanceHistory: rawPerformanceHistory, selectedBenchmarks = [], metrics } = data;
-  
-  const inceptionDate = rawPerformanceHistory.length > 0 
-    ? new Date(rawPerformanceHistory[0].date) 
+  const { portfolio, performanceHistory: rawPerformanceHistory, metrics } = data;
+
+  const inceptionDate = rawPerformanceHistory.length > 0
+    ? new Date(rawPerformanceHistory[0].date)
     : undefined;
   const startDate = getTimePeriodStartDate(selectedTimePeriod, inceptionDate);
-  
+
   const performanceHistory = rawPerformanceHistory.filter(
     (p) => new Date(p.date) >= startDate
   );
 
   const firstInPeriod = performanceHistory[0];
   const lastInPeriod = performanceHistory[performanceHistory.length - 1];
-  
+
   let periodTotalReturn = 0;
   let periodAnnualizedReturn = 0;
   let periodBenchmarkReturn = 0;
@@ -261,106 +184,58 @@ export default function PerformancePage() {
   let periodBestDay = 0;
   let periodWorstDay = 0;
   let periodPositiveDays = 0;
-  
+
   if (firstInPeriod && lastInPeriod) {
     const startValue = parseFloat(firstInPeriod.portfolioValue);
     const endValue = parseFloat(lastInPeriod.portfolioValue);
     periodTotalReturn = startValue > 0 ? (endValue - startValue) / startValue : 0;
-    
+
     const startDateMs = new Date(firstInPeriod.date).getTime();
     const endDateMs = new Date(lastInPeriod.date).getTime();
     const yearsElapsed = (endDateMs - startDateMs) / (365.25 * 24 * 60 * 60 * 1000);
     periodAnnualizedReturn = yearsElapsed > 0 ? Math.pow(1 + periodTotalReturn, 1 / yearsElapsed) - 1 : periodTotalReturn;
-    
+
     const dailyReturns = performanceHistory.map(p => parseFloat(p.dailyReturn || "0"));
     periodBestDay = Math.max(...dailyReturns);
     periodWorstDay = Math.min(...dailyReturns);
     periodPositiveDays = dailyReturns.filter(r => r > 0).length;
-    
+
     const startBenchmarkValue = firstInPeriod.benchmarkValue ? parseFloat(firstInPeriod.benchmarkValue) : startValue;
     const endBenchmarkValue = lastInPeriod.benchmarkValue ? parseFloat(lastInPeriod.benchmarkValue) : endValue;
     periodBenchmarkReturn = startBenchmarkValue > 0 ? (endBenchmarkValue - startBenchmarkValue) / startBenchmarkValue : 0;
     periodAlpha = periodTotalReturn - periodBenchmarkReturn;
   }
 
-  const allBenchmarks = benchmarksData?.benchmarks || [];
-  const compositeList = compositeBenchmarksData?.compositeBenchmarks || [];
-  const selectedBenchmarkIds = selectedBenchmarks.map(sb => sb.benchmark.id);
-  const availableBenchmarks = allBenchmarks.filter(b => !selectedBenchmarkIds.includes(b.id));
-  const availableCompositeBenchmarks = compositeList.filter(b => !selectedBenchmarkIds.includes(b.id));
+  // Build benchmark return lookup from the globally selected benchmark (sidebar)
+  const benchmarkReturns = globalBenchmarkReturns?.returns || [];
+  const benchmarkDateMap = new Map<string, number>();
+  const benchmarkSortedDates: string[] = [];
 
-  const categoryOrder = ["Custom", "Equity", "Fixed Income", "Real Estate", "Commodities", "Alternative", "Multi-Asset"];
-  
-  const benchmarksByCategory: Record<string, Array<{ id: string; name: string; ticker?: string | null; color?: string | null; isComposite?: boolean }>> = {};
-  
-  // Add composite benchmarks under "Custom" category
-  if (availableCompositeBenchmarks.length > 0) {
-    benchmarksByCategory["Custom"] = availableCompositeBenchmarks.map(b => ({ 
-      id: b.id, 
-      name: b.name,
-      ticker: null,
-      color: b.color || "#6366f1", 
-      isComposite: true 
-    }));
-  }
-  
-  // Add standard benchmarks by category
-  availableBenchmarks.forEach(b => {
-    const category = b.category || "Other";
-    if (!benchmarksByCategory[category]) benchmarksByCategory[category] = [];
-    benchmarksByCategory[category].push({ id: b.id, name: b.name, ticker: b.ticker, color: null, isComposite: false });
-  });
-
-  const sortedCategories = Object.keys(benchmarksByCategory).sort((a, b) => {
-    const indexA = categoryOrder.indexOf(a);
-    const indexB = categoryOrder.indexOf(b);
-    if (indexA === -1 && indexB === -1) return a.localeCompare(b);
-    if (indexA === -1) return 1;
-    if (indexB === -1) return -1;
-    return indexA - indexB;
-  });
-
-  // Build benchmark return lookup maps by date for proper alignment
-  // For aggregated (monthly/quarterly) data, build a sorted array so we can
-  // find the most recent period end date for any given portfolio date
-  const benchmarkReturnMaps = new Map<string, Map<string, number>>();
-  const benchmarkSortedDates = new Map<string, string[]>();
-  selectedBenchmarks.forEach(sb => {
-    const dateMap = new Map<string, number>();
-    const sortedDates: string[] = [];
-    // Sort returns chronologically
-    const sortedReturns = [...sb.returns].sort((a, b) =>
-      new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
-    sortedReturns.forEach(r => {
-      const dateKey = new Date(r.date).toISOString().split('T')[0];
-      if (r.cumulativeReturn) {
-        dateMap.set(dateKey, parseFloat(r.cumulativeReturn) * 100);
-        sortedDates.push(dateKey);
-      }
-    });
-    benchmarkReturnMaps.set(sb.benchmark.id, dateMap);
-    benchmarkSortedDates.set(sb.benchmark.id, sortedDates);
+  const sortedBenchmarkReturns = [...benchmarkReturns].sort((a: any, b: any) =>
+    new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+  sortedBenchmarkReturns.forEach((r: any) => {
+    const dateKey = new Date(r.date).toISOString().split('T')[0];
+    if (r.cumulativeReturn) {
+      benchmarkDateMap.set(dateKey, parseFloat(r.cumulativeReturn) * 100);
+      benchmarkSortedDates.push(dateKey);
+    }
   });
 
   // Helper: find the most recent benchmark value for a given date
   // This handles monthly/quarterly cadence where exact dates don't match
-  const findBenchmarkValue = (benchmarkId: string, dateKey: string): number | undefined => {
-    const dateMap = benchmarkReturnMaps.get(benchmarkId);
-    if (!dateMap) return undefined;
-
+  const findBenchmarkValue = (dateKey: string): number | undefined => {
     // Try exact match first (works for daily cadence)
-    const exact = dateMap.get(dateKey);
+    const exact = benchmarkDateMap.get(dateKey);
     if (exact !== undefined) return exact;
 
     // For aggregated cadence, find the most recent period end date <= dateKey
-    const dates = benchmarkSortedDates.get(benchmarkId);
-    if (!dates || dates.length === 0) return undefined;
+    if (benchmarkSortedDates.length === 0) return undefined;
 
     let lastValue: number | undefined;
-    for (const d of dates) {
+    for (const d of benchmarkSortedDates) {
       if (d <= dateKey) {
-        lastValue = dateMap.get(d);
+        lastValue = benchmarkDateMap.get(d);
       } else {
         break;
       }
@@ -368,24 +243,31 @@ export default function PerformancePage() {
     return lastValue;
   };
 
-  // Build chart data with portfolio and selected benchmarks joined by date
+  // Recalculate benchmark return and alpha from the globally selected benchmark
+  if (selectedBenchmark && benchmarkReturns.length > 0) {
+    const lastBenchReturn = sortedBenchmarkReturns[sortedBenchmarkReturns.length - 1];
+    if (lastBenchReturn?.cumulativeReturn) {
+      periodBenchmarkReturn = parseFloat(lastBenchReturn.cumulativeReturn);
+      periodAlpha = periodTotalReturn - periodBenchmarkReturn;
+    }
+  }
+
+  const benchmarkDisplayName = selectedBenchmark?.name || "Benchmark";
+
+  // Build chart data with portfolio and globally selected benchmark joined by date
   const returnChart = performanceHistory.map((p) => {
     const dateKey = new Date(p.date).toISOString().split('T')[0];
     const chartPoint: Record<string, any> = {
       date: formatDate(p.date),
       fullDate: formatDateFull(p.date),
       portfolio: p.cumulativeReturn ? parseFloat(p.cumulativeReturn) * 100 : 0,
-      defaultBenchmark: p.benchmarkReturn ? parseFloat(p.benchmarkReturn) * 100 : 0,
     };
 
-    // Add each selected benchmark's cumulative return matched by date
-    // Uses period-aware matching for monthly/quarterly aggregated data
-    selectedBenchmarks.forEach(sb => {
-      const benchmarkValue = findBenchmarkValue(sb.benchmark.id, dateKey);
-      if (benchmarkValue !== undefined) {
-        chartPoint[`benchmark_${sb.benchmark.id}`] = benchmarkValue;
-      }
-    });
+    // Add the globally selected benchmark's cumulative return
+    const benchmarkValue = findBenchmarkValue(dateKey);
+    if (benchmarkValue !== undefined) {
+      chartPoint["benchmark"] = benchmarkValue;
+    }
 
     return chartPoint;
   });
@@ -412,92 +294,16 @@ export default function PerformancePage() {
             {portfolio.name} • {getTimePeriodLabel(selectedTimePeriod)} performance and attribution
           </p>
         </div>
-        
-        <div className="flex flex-wrap items-center gap-2">
-          {selectedBenchmarks.map((sb, index) => (
-            <Badge 
-              key={sb.benchmark.id} 
-              variant="secondary"
-              className="flex items-center gap-1.5 px-2 py-1"
-              style={{ borderLeft: `3px solid ${sb.benchmark.color || BENCHMARK_COLORS[index % BENCHMARK_COLORS.length]}` }}
-            >
-              <span className="text-xs">{sb.benchmark.ticker || sb.benchmark.name}</span>
-              <button 
-                onClick={() => removeBenchmarkMutation.mutate(sb.benchmark.id)}
-                className="ml-1 hover:text-destructive"
-                data-testid={`button-remove-benchmark-${sb.benchmark.id}`}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </Badge>
-          ))}
-          
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" data-testid="button-add-benchmark">
-                <Plus className="h-4 w-4 mr-1" />
-                Add Benchmark
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-64 max-h-[400px] overflow-y-auto">
-              <DropdownMenuLabel>Select Benchmark by Category</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {sortedCategories.length === 0 ? (
-                <DropdownMenuItem disabled>
-                  All benchmarks added
-                </DropdownMenuItem>
-              ) : (
-                sortedCategories.map((category) => (
-                  <DropdownMenuSub key={category}>
-                    <DropdownMenuSubTrigger>
-                      <span>{category}</span>
-                      <Badge variant="outline" className="ml-auto text-xs">
-                        {benchmarksByCategory[category].length}
-                      </Badge>
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent className="max-h-[300px] overflow-y-auto">
-                      {benchmarksByCategory[category].map((benchmark) => (
-                        <DropdownMenuItem
-                          key={benchmark.id}
-                          onClick={() => {
-                            if (benchmark.isComposite) {
-                              toast({ 
-                                title: "Custom Benchmark", 
-                                description: "Use the Risk Analytics page to compare against custom benchmarks for rolling alpha analysis."
-                              });
-                            } else {
-                              addBenchmarkMutation.mutate(benchmark.id);
-                            }
-                          }}
-                          data-testid={`menu-item-benchmark-${benchmark.id}`}
-                        >
-                          <div className="flex items-center gap-2 w-full">
-                            <div 
-                              className="w-3 h-3 rounded-full" 
-                              style={{ backgroundColor: benchmark.color || "#6366f1" }}
-                            />
-                            <div className="flex-1">
-                              <div className="font-medium text-sm">
-                                {benchmark.name}
-                                {benchmark.isComposite && <Badge variant="secondary" className="ml-2 text-xs">Custom</Badge>}
-                              </div>
-                              <div className="text-xs text-muted-foreground">{benchmark.ticker}</div>
-                            </div>
-                          </div>
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
-                ))
-              )}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => setCompositeDialogOpen(true)}>
-                <Layers className="h-4 w-4 mr-2" />
-                Create Custom Blend
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+
+        {selectedBenchmark && (
+          <Badge
+            variant="secondary"
+            className="flex items-center gap-1.5 px-3 py-1.5"
+            style={{ borderLeft: `3px solid ${selectedBenchmark.color || "#6366f1"}` }}
+          >
+            <span className="text-xs">vs {selectedBenchmark.ticker !== "CUSTOM" ? selectedBenchmark.ticker : selectedBenchmark.name}</span>
+          </Badge>
+        )}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -559,29 +365,21 @@ export default function PerformancePage() {
                     tickLine={false}
                     tickFormatter={(v) => `${v.toFixed(0)}%`}
                   />
-                  <Tooltip 
-                    contentStyle={{ 
-                      backgroundColor: "hsl(var(--card))", 
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "hsl(var(--card))",
                       border: "1px solid hsl(var(--border))",
                       borderRadius: "6px",
                       fontSize: 12,
                     }}
                     labelFormatter={(label, payload) => payload[0]?.payload?.fullDate || label}
                     formatter={(value: number, name: string) => {
-                      const benchmarkMatch = selectedBenchmarks.find(sb => `benchmark_${sb.benchmark.id}` === name);
-                      const displayName = name === "portfolio" ? "Portfolio" 
-                        : name === "defaultBenchmark" ? "Default Benchmark"
-                        : benchmarkMatch?.benchmark.name || name;
+                      const displayName = name === "portfolio" ? "Portfolio" : benchmarkDisplayName;
                       return [`${value.toFixed(2)}%`, displayName];
                     }}
                   />
-                  <Legend 
-                    formatter={(value) => {
-                      const benchmarkMatch = selectedBenchmarks.find(sb => `benchmark_${sb.benchmark.id}` === value);
-                      return value === "portfolio" ? "Portfolio" 
-                        : value === "defaultBenchmark" ? "Default Benchmark"
-                        : benchmarkMatch?.benchmark.name || value;
-                    }}
+                  <Legend
+                    formatter={(value) => value === "portfolio" ? "Portfolio" : benchmarkDisplayName}
                   />
                   <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
                   <Area
@@ -592,26 +390,16 @@ export default function PerformancePage() {
                     fill="url(#colorCumulative)"
                     name="portfolio"
                   />
-                  <Line 
-                    type="monotone" 
-                    dataKey="defaultBenchmark" 
-                    stroke="hsl(var(--muted-foreground))" 
-                    strokeWidth={1.5}
-                    strokeDasharray="4 4"
-                    dot={false}
-                    name="defaultBenchmark"
-                  />
-                  {selectedBenchmarks.map((sb, index) => (
-                    <Line 
-                      key={sb.benchmark.id}
-                      type="monotone" 
-                      dataKey={`benchmark_${sb.benchmark.id}`}
-                      stroke={sb.benchmark.color || BENCHMARK_COLORS[index % BENCHMARK_COLORS.length]} 
+                  {benchmarkReturns.length > 0 && (
+                    <Line
+                      type="monotone"
+                      dataKey="benchmark"
+                      stroke={selectedBenchmark?.color || "hsl(var(--muted-foreground))"}
                       strokeWidth={2}
                       dot={false}
-                      name={`benchmark_${sb.benchmark.id}`}
+                      name="benchmark"
                     />
-                  ))}
+                  )}
                 </AreaChart>
               </ResponsiveContainer>
             </TabsContent>
@@ -733,13 +521,13 @@ export default function PerformancePage() {
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">Benchmark Return</span>
+                <span className="text-sm text-muted-foreground">{benchmarkDisplayName} Return</span>
                 <span className={`font-mono text-sm ${periodBenchmarkReturn >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                   {periodBenchmarkReturn >= 0 ? "+" : ""}{formatPercent(periodBenchmarkReturn)}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">Outperformance (Alpha)</span>
+                <span className="text-sm text-muted-foreground">Alpha vs {benchmarkDisplayName}</span>
                 <span className={`font-mono text-sm ${periodAlpha >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                   {periodAlpha >= 0 ? "+" : ""}{formatPercent(periodAlpha)}
                 </span>
@@ -755,181 +543,6 @@ export default function PerformancePage() {
         </Card>
       </div>
 
-      {selectedBenchmarks.length > 0 && (
-        <Card data-testid="card-benchmark-comparison">
-          <CardHeader>
-            <CardTitle className="text-base font-medium">Selected Benchmarks</CardTitle>
-            <CardDescription>Benchmarks for performance comparison</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-3">
-              {selectedBenchmarks.map((sb, index) => {
-                const lastReturn = sb.returns[sb.returns.length - 1];
-                const totalReturn = lastReturn?.cumulativeReturn ? parseFloat(lastReturn.cumulativeReturn) : 0;
-                return (
-                  <div 
-                    key={sb.benchmark.id} 
-                    className="flex items-center justify-between p-3 rounded-lg border"
-                    style={{ borderLeftWidth: 4, borderLeftColor: sb.benchmark.color || BENCHMARK_COLORS[index % BENCHMARK_COLORS.length] }}
-                  >
-                    <div>
-                      <div className="font-medium text-sm">{sb.benchmark.name}</div>
-                      <div className="text-xs text-muted-foreground">{sb.benchmark.ticker} • {sb.benchmark.category}</div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className={`font-mono text-sm ${totalReturn >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                        {totalReturn >= 0 ? "+" : ""}{(totalReturn * 100).toFixed(2)}%
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => removeBenchmarkMutation.mutate(sb.benchmark.id)}
-                        data-testid={`button-remove-benchmark-card-${sb.benchmark.id}`}
-                      >
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      <Dialog open={compositeDialogOpen} onOpenChange={setCompositeDialogOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Create Custom Composite Benchmark</DialogTitle>
-            <DialogDescription>
-              Blend multiple benchmarks with custom allocations to create your own benchmark.
-            </DialogDescription>
-          </DialogHeader>
-          
-          <div className="space-y-4">
-            <div>
-              <Label htmlFor="composite-name">Benchmark Name</Label>
-              <Input
-                id="composite-name"
-                value={compositeName}
-                onChange={(e) => setCompositeName(e.target.value)}
-                placeholder="e.g., 70/30 Global Equity-Bond"
-                data-testid="input-composite-name"
-              />
-            </div>
-            
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label>Component Allocations</Label>
-                <span className={`text-sm ${
-                  Math.abs(compositeComponents.reduce((sum, c) => sum + c.weight, 0) - 1) < 0.001 
-                    ? "text-emerald-500" 
-                    : "text-muted-foreground"
-                }`}>
-                  Total: {(compositeComponents.reduce((sum, c) => sum + c.weight, 0) * 100).toFixed(0)}%
-                </span>
-              </div>
-              
-              {compositeComponents.map((component, index) => (
-                <div key={component.benchmarkId} className="flex items-center gap-2 p-2 bg-muted rounded-md">
-                  <div className="flex-1 text-sm">{component.name}</div>
-                  <div className="flex items-center gap-2 w-32">
-                    <Slider
-                      value={[component.weight * 100]}
-                      onValueChange={([value]) => {
-                        const updated = [...compositeComponents];
-                        updated[index] = { ...component, weight: value / 100 };
-                        setCompositeComponents(updated);
-                      }}
-                      max={100}
-                      step={5}
-                      className="flex-1"
-                    />
-                    <span className="text-sm w-10 text-right">{(component.weight * 100).toFixed(0)}%</span>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => {
-                      setCompositeComponents(compositeComponents.filter((_, i) => i !== index));
-                    }}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
-              
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" className="w-full">
-                    <Plus className="h-4 w-4 mr-2" />
-                    Add Component
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent className="w-64 max-h-[300px] overflow-y-auto">
-                  {sortedCategories.map((category) => (
-                    <DropdownMenuSub key={category}>
-                      <DropdownMenuSubTrigger>{category}</DropdownMenuSubTrigger>
-                      <DropdownMenuSubContent className="max-h-[250px] overflow-y-auto">
-                        {benchmarksByCategory[category]
-                          .filter(b => !compositeComponents.some(c => c.benchmarkId === b.id))
-                          .map((benchmark) => (
-                            <DropdownMenuItem
-                              key={benchmark.id}
-                              onClick={() => {
-                                setCompositeComponents([
-                                  ...compositeComponents,
-                                  { benchmarkId: benchmark.id, name: benchmark.name, weight: 0.2 },
-                                ]);
-                              }}
-                            >
-                              <div 
-                                className="w-3 h-3 rounded-full mr-2" 
-                                style={{ backgroundColor: benchmark.color || "#6366f1" }}
-                              />
-                              {benchmark.name}
-                            </DropdownMenuItem>
-                          ))}
-                      </DropdownMenuSubContent>
-                    </DropdownMenuSub>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          </div>
-          
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCompositeDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button 
-              onClick={() => {
-                if (!compositeName.trim()) {
-                  toast({ title: "Error", description: "Please enter a benchmark name", variant: "destructive" });
-                  return;
-                }
-                if (compositeComponents.length === 0) {
-                  toast({ title: "Error", description: "Please add at least one component", variant: "destructive" });
-                  return;
-                }
-                const totalWeight = compositeComponents.reduce((sum, c) => sum + c.weight, 0);
-                if (Math.abs(totalWeight - 1) > 0.01) {
-                  toast({ title: "Error", description: "Weights must sum to 100%", variant: "destructive" });
-                  return;
-                }
-                createCompositeMutation.mutate({
-                  name: compositeName,
-                  components: compositeComponents,
-                });
-              }}
-              disabled={createCompositeMutation.isPending}
-              data-testid="button-create-composite"
-            >
-              {createCompositeMutation.isPending ? "Creating..." : "Create Benchmark"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

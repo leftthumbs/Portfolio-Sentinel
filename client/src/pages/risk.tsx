@@ -1,21 +1,12 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
-import { useAllBenchmarks } from "@/hooks/use-all-benchmarks";
-import { AlertTriangle, Shield, Activity, TrendingDown, BarChart3, Scale } from "lucide-react";
+import { AlertTriangle, Shield, Activity, TrendingDown, BarChart3 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { MetricCard } from "@/components/metric-card";
 import { ChartSkeleton, MetricCardSkeleton } from "@/components/loading-skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   AreaChart,
   Area,
@@ -94,15 +85,16 @@ interface PortfolioOptionsData {
 }
 
 export default function RiskPage() {
-  const { selectedPortfolioId, selectedPortfolioType, selectedPortfolio, selectedBenchmarkId: globalBenchmarkId, selectedTimePeriod } = usePortfolio();
-  const [localBenchmarkId, setLocalBenchmarkId] = useState<string>("");
-  const [selectedBenchmarkType, setSelectedBenchmarkType] = useState<"standard" | "composite">("standard");
-  const { allBenchmarks: allBenchmarksList, isLoading: isLoadingBenchmarks } = useAllBenchmarks();
+  const { selectedPortfolioId, selectedPortfolioType, selectedPortfolio, selectedBenchmarkId: globalBenchmarkId, selectedBenchmark, selectedTimePeriod } = usePortfolio();
 
-  const selectedBenchmarkId = localBenchmarkId || globalBenchmarkId;
-  const setSelectedBenchmarkId = setLocalBenchmarkId;
+  // Use the global benchmark from sidebar - determine type and API ID
+  const isCompositeBenchmark = selectedBenchmark?.isComposite === true;
+  const selectedBenchmarkId = globalBenchmarkId;
+  const benchmarkApiId = isCompositeBenchmark && selectedBenchmarkId?.startsWith("composite-")
+    ? selectedBenchmarkId.replace("composite-", "")
+    : selectedBenchmarkId;
 
-  const riskUrl = selectedPortfolioId 
+  const riskUrl = selectedPortfolioId
     ? `/api/risk?portfolioId=${selectedPortfolioId}&portfolioType=${selectedPortfolioType}`
     : "/api/risk";
 
@@ -116,19 +108,21 @@ export default function RiskPage() {
   });
 
   const { data: benchmarkReturnsData } = useQuery<BenchmarkReturnsData>({
-    queryKey: selectedBenchmarkType === "composite" 
-      ? ["/api/composite-benchmarks", selectedBenchmarkId, "returns"]
-      : ["/api/benchmarks", selectedBenchmarkId, "returns"],
+    queryKey: [
+      isCompositeBenchmark ? "/api/composite-benchmarks" : "/api/benchmarks",
+      benchmarkApiId,
+      "returns",
+    ],
     queryFn: async () => {
-      if (!selectedBenchmarkId) return { returns: [] };
-      const endpoint = selectedBenchmarkType === "composite"
-        ? `/api/composite-benchmarks/${selectedBenchmarkId}/returns`
-        : `/api/benchmarks/${selectedBenchmarkId}/returns`;
+      if (!benchmarkApiId) return { returns: [] };
+      const endpoint = isCompositeBenchmark
+        ? `/api/composite-benchmarks/${benchmarkApiId}/returns`
+        : `/api/benchmarks/${benchmarkApiId}/returns`;
       const res = await fetch(endpoint, { credentials: "include" });
       if (!res.ok) return { returns: [] };
       return res.json();
     },
-    enabled: !!selectedBenchmarkId,
+    enabled: !!benchmarkApiId,
   });
 
   if (isLoading) {
@@ -290,22 +284,9 @@ export default function RiskPage() {
     { label: "CAGR", value: formatPercent(cagr), description: "Compound annual growth rate" },
   ];
 
-  // Calculate rolling alpha based on selected benchmark
+  // Calculate rolling alpha based on globally selected benchmark (sidebar)
   const benchmarkReturns = benchmarkReturnsData?.returns || [];
-  
-  // Group benchmarks by category
-  const benchmarksByCategory: Record<string, typeof allBenchmarksList> = {};
-  allBenchmarksList.forEach((b) => {
-    const category = b.category || "Other";
-    if (!benchmarksByCategory[category]) benchmarksByCategory[category] = [];
-    benchmarksByCategory[category].push(b);
-  });
-
-  const handleBenchmarkChange = (value: string) => {
-    const [type, id] = value.split(":");
-    setSelectedBenchmarkId(id);
-    setSelectedBenchmarkType(type as "standard" | "composite");
-  };
+  const benchmarkDisplayName = selectedBenchmark?.name || "Benchmark";
   
   // Build benchmark return lookup by date
   const benchmarkReturnsByDate = new Map<string, number>();
@@ -657,42 +638,23 @@ export default function RiskPage() {
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
               <CardTitle className="text-base font-medium">Rolling Alpha Analysis</CardTitle>
-              <CardDescription>Trailing 1-year and 3-year alpha vs selected benchmark</CardDescription>
+              <CardDescription>Trailing 1-year and 3-year alpha vs {benchmarkDisplayName}</CardDescription>
             </div>
-            <Select value={selectedBenchmarkId ? `${selectedBenchmarkType}:${selectedBenchmarkId}` : ""} onValueChange={handleBenchmarkChange}>
-              <SelectTrigger className="w-[260px]" data-testid="select-alpha-benchmark">
-                <SelectValue placeholder="Select benchmark" />
-              </SelectTrigger>
-              <SelectContent className="max-h-[300px]">
-                {Object.entries(benchmarksByCategory).map(([category, benchmarks]) => (
-                  <div key={category}>
-                    <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground flex items-center gap-2">
-                      {category === "Custom" && <Scale className="h-3 w-3" />}
-                      {category}
-                    </div>
-                    {benchmarks.map((benchmark) => (
-                      <SelectItem 
-                        key={`${benchmark.type}:${benchmark.id}`} 
-                        value={`${benchmark.type}:${benchmark.id}`}
-                      >
-                        <span className="flex items-center gap-2">
-                          {benchmark.name}
-                          {benchmark.type === "composite" && (
-                            <Badge variant="outline" className="text-xs py-0 h-4">Custom</Badge>
-                          )}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </div>
-                ))}
-              </SelectContent>
-            </Select>
+            {selectedBenchmark && (
+              <Badge
+                variant="secondary"
+                className="flex items-center gap-1.5 px-3 py-1.5"
+                style={{ borderLeft: `3px solid ${selectedBenchmark.color || "#6366f1"}` }}
+              >
+                <span className="text-xs">vs {selectedBenchmark.ticker !== "CUSTOM" ? selectedBenchmark.ticker : selectedBenchmark.name}</span>
+              </Badge>
+            )}
           </div>
         </CardHeader>
         <CardContent>
-          {!selectedBenchmarkId ? (
+          {!benchmarkApiId ? (
             <div className="flex flex-col items-center justify-center h-[200px] text-muted-foreground">
-              <p>Select a benchmark to view rolling alpha</p>
+              <p>Select a benchmark from the sidebar to view rolling alpha</p>
             </div>
           ) : (
             <div className="space-y-6">
