@@ -80,23 +80,42 @@ export function useAllBenchmarks(): AllBenchmarksResult {
   };
 }
 
-export function useBenchmarkReturns(benchmarkId: string | null, benchmarkType: "standard" | "composite") {
-  const standardQuery = useQuery<{ returns: any[] }>({
-    queryKey: ["/api/benchmarks", benchmarkId, "returns"],
+export type TimePeriod = "YTD" | "LTM" | "1Y" | "3Y" | "5Y" | "10Y" | "SI";
+export type Cadence = "daily" | "monthly" | "quarterly";
+
+export function useBenchmarkReturns(
+  benchmarkId: string | null,
+  benchmarkType: "standard" | "composite",
+  timePeriod?: TimePeriod,
+  cadence?: Cadence
+) {
+  // Build query string with optional timePeriod and cadence params
+  const buildUrl = (base: string) => {
+    const params = new URLSearchParams();
+    if (timePeriod) params.set("timePeriod", timePeriod);
+    if (cadence) params.set("cadence", cadence);
+    const qs = params.toString();
+    return qs ? `${base}?${qs}` : base;
+  };
+
+  const standardQuery = useQuery<{ returns: any[]; cadence?: string; timePeriod?: string; metrics?: any }>({
+    queryKey: ["/api/benchmarks", benchmarkId, "returns", timePeriod, cadence],
     queryFn: async () => {
       if (!benchmarkId) return { returns: [] };
-      const res = await fetch(`/api/benchmarks/${benchmarkId}/returns`, { credentials: "include" });
+      const url = buildUrl(`/api/benchmarks/${benchmarkId}/returns`);
+      const res = await fetch(url, { credentials: "include" });
       if (!res.ok) return { returns: [] };
       return res.json();
     },
     enabled: !!benchmarkId && benchmarkType === "standard",
   });
 
-  const compositeQuery = useQuery<{ returns: any[] }>({
-    queryKey: ["/api/composite-benchmarks", benchmarkId, "returns"],
+  const compositeQuery = useQuery<{ returns: any[]; cadence?: string; timePeriod?: string; metrics?: any }>({
+    queryKey: ["/api/composite-benchmarks", benchmarkId, "returns", timePeriod, cadence],
     queryFn: async () => {
       if (!benchmarkId) return { returns: [] };
-      const res = await fetch(`/api/composite-benchmarks/${benchmarkId}/returns`, { credentials: "include" });
+      const url = buildUrl(`/api/composite-benchmarks/${benchmarkId}/returns`);
+      const res = await fetch(url, { credentials: "include" });
       if (!res.ok) return { returns: [] };
       return res.json();
     },

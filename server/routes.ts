@@ -18,6 +18,18 @@ import { setupAuth } from "./auth";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns } from "./riskCalculations";
+import {
+  processReturnsForPeriod,
+  processCompositeReturns,
+  determineCadence,
+  filterReturnsByTimePeriod,
+  aggregateReturns,
+  calculateMetricsFromAggregated,
+  redemptionFrequencyToCadence,
+  type TimePeriod as BenchmarkTimePeriod,
+  type Cadence,
+  type ReturnDataPoint,
+} from "./benchmarkCalculations";
 
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
@@ -529,8 +541,10 @@ export async function registerRoutes(
       } else {
         // Handle core portfolio performance
         const pid = portfolioId || await getDefaultPortfolioId();
-        
-        const [portfolio, performanceHistory, portfolioBenchmarks, allBenchmarks] = await Promise.all([
+        const timePeriod = req.query.timePeriod as BenchmarkTimePeriod | undefined;
+        const cadence = req.query.cadence as Cadence | undefined;
+
+        const [portfolio, performanceHistory, portfolioBenchmarksList, allBenchmarks] = await Promise.all([
           storage.getPortfolio(pid),
           storage.getPerformanceHistory(pid),
           storage.getPortfolioBenchmarks(pid),
@@ -541,7 +555,7 @@ export async function registerRoutes(
           return res.status(404).json({ message: "Portfolio not found" });
         }
 
-        const sortedHistory = performanceHistory.sort((a, b) => 
+        const sortedHistory = performanceHistory.sort((a, b) =>
           new Date(a.date).getTime() - new Date(b.date).getTime()
         );
 
@@ -557,21 +571,42 @@ export async function registerRoutes(
         const lastEntry = sortedHistory[sortedHistory.length - 1];
         const totalReturn = lastEntry?.cumulativeReturn ? parseFloat(lastEntry.cumulativeReturn) : 0;
         const benchmarkReturn = lastEntry?.benchmarkReturn ? parseFloat(lastEntry.benchmarkReturn) : 0;
-        
+
         const annualizedReturn = Math.pow(1 + totalReturn, 365 / totalDays) - 1;
         const alpha = totalReturn - benchmarkReturn;
 
         // Get benchmark return data for selected benchmarks
+        // Download full time series and process based on time period and cadence
         const selectedBenchmarkData: Array<{
           benchmark: typeof allBenchmarks[0];
-          returns: Awaited<ReturnType<typeof storage.getBenchmarkReturns>>;
+          returns: any[];
+          cadence?: Cadence;
+          metrics?: { totalReturn: number; annualizedReturn: number; annualizedVolatility: number; periodCount: number };
         }> = [];
 
-        for (const pb of portfolioBenchmarks) {
+        for (const pb of portfolioBenchmarksList) {
           const benchmark = allBenchmarks.find(b => b.id === pb.benchmarkId);
           if (benchmark) {
-            const returns = await storage.getBenchmarkReturns(benchmark.id);
-            selectedBenchmarkData.push({ benchmark, returns });
+            // Fetch full time series
+            const rawReturns = await storage.getBenchmarkReturns(benchmark.id);
+
+            if (timePeriod) {
+              // Process: filter to time period and aggregate to the right cadence
+              const processed = processReturnsForPeriod(
+                rawReturns as ReturnDataPoint[],
+                timePeriod,
+                cadence
+              );
+              const benchMetrics = calculateMetricsFromAggregated(processed);
+              selectedBenchmarkData.push({
+                benchmark,
+                returns: processed,
+                cadence: processed.length > 0 ? processed[0].cadence : determineCadence(timePeriod, cadence),
+                metrics: benchMetrics,
+              });
+            } else {
+              selectedBenchmarkData.push({ benchmark, returns: rawReturns });
+            }
           }
         }
 
@@ -3251,12 +3286,39 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     }
   });
 
-  // Benchmark returns
+  // Benchmark returns - supports timePeriod and cadence query params
+  // When timePeriod is provided, downloads the full time series for that period
+  // and dynamically calculates daily, monthly, or quarterly figures
   app.get("/api/benchmarks/:id/returns", async (req, res) => {
     try {
       const { id } = req.params;
-      const returns = await storage.getBenchmarkReturns(id);
-      res.json({ returns });
+      const timePeriod = req.query.timePeriod as BenchmarkTimePeriod | undefined;
+      const cadence = req.query.cadence as Cadence | undefined;
+
+      // Fetch the full time series from the database
+      const rawReturns = await storage.getBenchmarkReturns(id);
+
+      if (!timePeriod) {
+        // No time period specified - return raw daily data (backward compatible)
+        res.json({ returns: rawReturns });
+        return;
+      }
+
+      // Process: filter to time period, then aggregate to the appropriate cadence
+      const processed = processReturnsForPeriod(
+        rawReturns as ReturnDataPoint[],
+        timePeriod,
+        cadence
+      );
+
+      const metrics = calculateMetricsFromAggregated(processed);
+
+      res.json({
+        returns: processed,
+        cadence: processed.length > 0 ? processed[0].cadence : determineCadence(timePeriod, cadence),
+        timePeriod,
+        metrics,
+      });
     } catch (error: any) {
       console.error("Get benchmark returns error:", error);
       res.status(500).json({ message: "Failed to fetch benchmark returns" });
@@ -3375,45 +3437,68 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
   app.get("/api/composite-benchmarks/:id/returns", async (req, res) => {
     try {
       const { id } = req.params;
+      const timePeriod = req.query.timePeriod as BenchmarkTimePeriod | undefined;
+      const cadence = req.query.cadence as Cadence | undefined;
+
       const composite = await storage.getCompositeBenchmark(id);
       if (!composite) {
         return res.status(404).json({ message: "Composite benchmark not found" });
       }
-      
+
       const components = await storage.getCompositeBenchmarkComponents(id);
       if (components.length === 0) {
         return res.json({ returns: [] });
       }
-      
+
+      // Fetch full time series for each component
       const componentReturns = await Promise.all(
         components.map(async (c) => ({
           weight: parseFloat(c.weight),
-          returns: await storage.getBenchmarkReturns(c.benchmarkId),
+          returns: (await storage.getBenchmarkReturns(c.benchmarkId)) as ReturnDataPoint[],
         }))
       );
-      
-      const dateMap = new Map<string, number>();
-      componentReturns.forEach(({ weight, returns }) => {
-        returns.forEach((r) => {
-          const dateKey = new Date(r.date).toISOString().split('T')[0];
-          const existingReturn = dateMap.get(dateKey) || 0;
-          dateMap.set(dateKey, existingReturn + parseFloat(r.returnValue) * weight);
+
+      if (timePeriod) {
+        // Use the new pipeline: filter to time period, weight-combine, aggregate
+        const processed = processCompositeReturns(
+          componentReturns,
+          timePeriod,
+          cadence
+        );
+
+        const metrics = calculateMetricsFromAggregated(processed);
+
+        res.json({
+          returns: processed,
+          cadence: processed.length > 0 ? processed[0].cadence : determineCadence(timePeriod, cadence),
+          timePeriod,
+          metrics,
         });
-      });
-      
-      let cumulativeReturn = 0;
-      const compositeReturns = Array.from(dateMap.entries())
-        .sort((a, b) => a[0].localeCompare(b[0]))
-        .map(([date, returnValue]) => {
-          cumulativeReturn = (1 + cumulativeReturn) * (1 + returnValue) - 1;
-          return {
-            date: new Date(date),
-            returnValue: String(returnValue),
-            cumulativeReturn: String(cumulativeReturn),
-          };
+      } else {
+        // Backward compatible: return raw weighted daily data
+        const dateMap = new Map<string, number>();
+        componentReturns.forEach(({ weight, returns }) => {
+          returns.forEach((r) => {
+            const dateKey = new Date(r.date).toISOString().split('T')[0];
+            const existingReturn = dateMap.get(dateKey) || 0;
+            dateMap.set(dateKey, existingReturn + parseFloat(r.returnValue) * weight);
+          });
         });
-      
-      res.json({ returns: compositeReturns });
+
+        let cumulativeReturn = 0;
+        const compositeReturns = Array.from(dateMap.entries())
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([date, returnValue]) => {
+            cumulativeReturn = (1 + cumulativeReturn) * (1 + returnValue) - 1;
+            return {
+              date: new Date(date),
+              returnValue: String(returnValue),
+              cumulativeReturn: String(cumulativeReturn),
+            };
+          });
+
+        res.json({ returns: compositeReturns });
+      }
     } catch (error: any) {
       console.error("Get composite benchmark returns error:", error);
       res.status(500).json({ message: "Failed to fetch composite benchmark returns" });

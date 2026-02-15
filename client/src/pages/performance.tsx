@@ -109,12 +109,24 @@ export default function PerformancePage() {
   const { toast } = useToast();
   const { selectedPortfolioId, selectedPortfolioType, selectedTimePeriod } = usePortfolio();
 
-  const performanceUrl = selectedPortfolioId 
-    ? `/api/performance?portfolioId=${selectedPortfolioId}&portfolioType=${selectedPortfolioType}`
-    : "/api/performance";
+  // Build performance URL with timePeriod for period-aware benchmark calculations
+  const buildPerformanceUrl = () => {
+    const params = new URLSearchParams();
+    if (selectedPortfolioId) {
+      params.set("portfolioId", selectedPortfolioId);
+      params.set("portfolioType", selectedPortfolioType);
+    }
+    if (selectedTimePeriod) {
+      params.set("timePeriod", selectedTimePeriod);
+    }
+    const qs = params.toString();
+    return qs ? `/api/performance?${qs}` : "/api/performance";
+  };
+
+  const performanceUrl = buildPerformanceUrl();
 
   const { data, isLoading, error, refetch } = useQuery<PerformanceData & { isCustomPortfolio?: boolean }>({
-    queryKey: ["/api/performance", selectedPortfolioId, selectedPortfolioType],
+    queryKey: ["/api/performance", selectedPortfolioId, selectedPortfolioType, selectedTimePeriod],
     queryFn: async () => {
       const res = await fetch(performanceUrl, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch performance data");
@@ -309,17 +321,52 @@ export default function PerformancePage() {
   });
 
   // Build benchmark return lookup maps by date for proper alignment
+  // For aggregated (monthly/quarterly) data, build a sorted array so we can
+  // find the most recent period end date for any given portfolio date
   const benchmarkReturnMaps = new Map<string, Map<string, number>>();
+  const benchmarkSortedDates = new Map<string, string[]>();
   selectedBenchmarks.forEach(sb => {
     const dateMap = new Map<string, number>();
-    sb.returns.forEach(r => {
+    const sortedDates: string[] = [];
+    // Sort returns chronologically
+    const sortedReturns = [...sb.returns].sort((a, b) =>
+      new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+    sortedReturns.forEach(r => {
       const dateKey = new Date(r.date).toISOString().split('T')[0];
       if (r.cumulativeReturn) {
         dateMap.set(dateKey, parseFloat(r.cumulativeReturn) * 100);
+        sortedDates.push(dateKey);
       }
     });
     benchmarkReturnMaps.set(sb.benchmark.id, dateMap);
+    benchmarkSortedDates.set(sb.benchmark.id, sortedDates);
   });
+
+  // Helper: find the most recent benchmark value for a given date
+  // This handles monthly/quarterly cadence where exact dates don't match
+  const findBenchmarkValue = (benchmarkId: string, dateKey: string): number | undefined => {
+    const dateMap = benchmarkReturnMaps.get(benchmarkId);
+    if (!dateMap) return undefined;
+
+    // Try exact match first (works for daily cadence)
+    const exact = dateMap.get(dateKey);
+    if (exact !== undefined) return exact;
+
+    // For aggregated cadence, find the most recent period end date <= dateKey
+    const dates = benchmarkSortedDates.get(benchmarkId);
+    if (!dates || dates.length === 0) return undefined;
+
+    let lastValue: number | undefined;
+    for (const d of dates) {
+      if (d <= dateKey) {
+        lastValue = dateMap.get(d);
+      } else {
+        break;
+      }
+    }
+    return lastValue;
+  };
 
   // Build chart data with portfolio and selected benchmarks joined by date
   const returnChart = performanceHistory.map((p) => {
@@ -330,16 +377,16 @@ export default function PerformancePage() {
       portfolio: p.cumulativeReturn ? parseFloat(p.cumulativeReturn) * 100 : 0,
       defaultBenchmark: p.benchmarkReturn ? parseFloat(p.benchmarkReturn) * 100 : 0,
     };
-    
+
     // Add each selected benchmark's cumulative return matched by date
+    // Uses period-aware matching for monthly/quarterly aggregated data
     selectedBenchmarks.forEach(sb => {
-      const dateMap = benchmarkReturnMaps.get(sb.benchmark.id);
-      const benchmarkValue = dateMap?.get(dateKey);
+      const benchmarkValue = findBenchmarkValue(sb.benchmark.id, dateKey);
       if (benchmarkValue !== undefined) {
         chartPoint[`benchmark_${sb.benchmark.id}`] = benchmarkValue;
       }
     });
-    
+
     return chartPoint;
   });
 

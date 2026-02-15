@@ -63,22 +63,27 @@ export async function seedDatabase() {
     });
   }
 
+  // Generate 10 years (~3650 days) of daily performance data
+  const HISTORY_DAYS = 3650;
   const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 365);
-  
+  startDate.setDate(startDate.getDate() - HISTORY_DAYS);
+
   let portfolioValue = 100000000;
   let benchmarkValue = 100000000;
   let cumulativeReturn = 0;
   let benchmarkReturn = 0;
 
   const performanceData = [];
-  for (let i = 0; i < 365; i++) {
+  for (let i = 0; i < HISTORY_DAYS; i++) {
     const date = new Date(startDate);
     date.setDate(date.getDate() + i);
-    
+
+    // Skip weekends
+    if (date.getDay() === 0 || date.getDay() === 6) continue;
+
     const dailyReturn = (Math.random() - 0.48) * 0.025;
     const benchDailyReturn = (Math.random() - 0.48) * 0.022;
-    
+
     portfolioValue *= (1 + dailyReturn);
     benchmarkValue *= (1 + benchDailyReturn);
     cumulativeReturn = (portfolioValue / 100000000) - 1;
@@ -95,8 +100,11 @@ export async function seedDatabase() {
     });
   }
 
-  for (const p of performanceData) {
-    await db.insert(performanceHistory).values(p);
+  // Batch insert for performance
+  const BATCH_SIZE = 500;
+  for (let i = 0; i < performanceData.length; i += BATCH_SIZE) {
+    const batch = performanceData.slice(i, i + BATCH_SIZE);
+    await db.insert(performanceHistory).values(batch);
   }
 
   await db.insert(riskMetrics).values({
@@ -220,11 +228,12 @@ export async function seedBenchmarks() {
     insertedBenchmarks.push(inserted);
   }
 
-  // Seed benchmark return data for each benchmark
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 365);
-  
-  // Different base returns for variety by asset class
+  // Seed 10 years (~3650 days) of benchmark return data for each benchmark
+  const BENCHMARK_HISTORY_DAYS = 3650;
+  const benchStartDate = new Date();
+  benchStartDate.setDate(benchStartDate.getDate() - BENCHMARK_HISTORY_DAYS);
+
+  // Different base daily returns for variety by ticker
   const baseReturns: Record<string, number> = {
     // Equity (~8-15% annualized)
     "SPY": 0.0003, "URTH": 0.00025, "EEM": 0.0002, "QQQ": 0.0004, "IWM": 0.00022,
@@ -252,20 +261,24 @@ export async function seedBenchmarks() {
     "Multi-Asset": 0.006,
   };
 
+  const BENCH_BATCH_SIZE = 500;
   for (const benchmark of insertedBenchmarks) {
     const returnsData = [];
     let cumulativeReturn = 0;
     const baseReturn = baseReturns[benchmark.ticker] || 0.0002;
     const volatility = volatilityByCategory[benchmark.category] || 0.01;
-    
-    for (let i = 0; i < 365; i++) {
-      const date = new Date(startDate);
+
+    for (let i = 0; i < BENCHMARK_HISTORY_DAYS; i++) {
+      const date = new Date(benchStartDate);
       date.setDate(date.getDate() + i);
-      
+
+      // Skip weekends
+      if (date.getDay() === 0 || date.getDay() === 6) continue;
+
       // Generate realistic daily returns with category-appropriate volatility
       const dailyReturn = baseReturn + (Math.random() - 0.5) * volatility;
       cumulativeReturn = (1 + cumulativeReturn) * (1 + dailyReturn) - 1;
-      
+
       returnsData.push({
         benchmarkId: benchmark.id,
         date,
@@ -273,8 +286,12 @@ export async function seedBenchmarks() {
         cumulativeReturn: String(cumulativeReturn),
       });
     }
-    
-    await db.insert(benchmarkReturns).values(returnsData);
+
+    // Batch insert benchmark returns
+    for (let i = 0; i < returnsData.length; i += BENCH_BATCH_SIZE) {
+      const batch = returnsData.slice(i, i + BENCH_BATCH_SIZE);
+      await db.insert(benchmarkReturns).values(batch);
+    }
   }
 
   console.log("Benchmarks seeded successfully with return data");
