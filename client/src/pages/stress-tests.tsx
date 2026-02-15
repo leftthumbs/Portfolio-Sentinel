@@ -497,6 +497,46 @@ export default function StressTestsPage() {
           )}
         </CardContent>
       </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base font-medium">Stress Testing Methodology</CardTitle>
+          <CardDescription>How scenario analysis is performed</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              Stress tests use a <strong className="text-foreground">deterministic factor-based sensitivity analysis</strong> to estimate portfolio
+              impact under various market scenarios. This is not a Monte Carlo simulation — each scenario produces a single,
+              deterministic outcome based on the portfolio's asset class weights and predefined factor sensitivities.
+            </p>
+            <div>
+              <p className="font-medium text-foreground mb-2">Impact Calculation</p>
+              <p className="mb-2">The total portfolio impact is calculated as the sum of four factor-specific impacts, each weighted by the portfolio's actual asset class allocations:</p>
+              <ul className="space-y-1.5 ml-4 list-disc">
+                <li><strong className="text-foreground">Equity Impact</strong> = Equity Shock × Equity Weight — direct pass-through of equity market movements</li>
+                <li><strong className="text-foreground">Interest Rate Impact</strong> = Rate Shock × (-8) × Fixed Income Weight — assumes an effective portfolio duration of ~8 years for fixed income holdings</li>
+                <li><strong className="text-foreground">Credit Spread Impact</strong> = Credit Spread Shock × (-5) × Fixed Income Weight — assumes a spread duration of ~5 years for credit-sensitive holdings</li>
+                <li><strong className="text-foreground">FX Impact</strong> = FX Shock × 0.3 × (Equity + Alternative Weight) — assumes approximately 30% foreign currency exposure in equity and alternative allocations</li>
+              </ul>
+            </div>
+            <div>
+              <p className="font-medium text-foreground mb-2">Asset Class Classification</p>
+              <p>
+                Portfolio holdings are classified into four buckets — Equity, Fixed Income, Commodities, and Alternatives — based on their
+                asset class labels. Each holding's allocation weight determines how much of the portfolio is exposed to the corresponding factor shock.
+              </p>
+            </div>
+            <div>
+              <p className="font-medium text-foreground mb-2">Limitations</p>
+              <p>
+                This approach provides a first-order linear approximation of portfolio stress impact. It does not account for non-linear effects
+                (convexity, option payoffs), cross-asset correlations that may change under stress, or liquidity-driven amplification effects.
+                Preset scenarios are calibrated to approximate historical episodes but are stylized representations, not exact replays.
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

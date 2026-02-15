@@ -196,6 +196,40 @@ export default function RiskPage() {
     );
   }
 
+  // Detect portfolio data cadence from data point intervals
+  const detectPortfolioCadence = (): "daily" | "monthly" | "quarterly" => {
+    if (performanceHistory.length < 2) return "daily";
+    const intervals: number[] = [];
+    for (let i = 1; i < Math.min(performanceHistory.length, 20); i++) {
+      const diff = new Date(performanceHistory[i].date).getTime() - new Date(performanceHistory[i - 1].date).getTime();
+      intervals.push(diff / (1000 * 60 * 60 * 24));
+    }
+    const avgDays = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    if (avgDays > 60) return "quarterly";
+    if (avgDays > 15) return "monthly";
+    return "daily";
+  };
+
+  const portfolioCadence = detectPortfolioCadence();
+
+  const cadenceLabel = (cadence: "daily" | "monthly" | "quarterly") => {
+    switch (cadence) {
+      case "quarterly": return { period: "Quarter", periods: "Quarters", singular: "quarterly" };
+      case "monthly": return { period: "Month", periods: "Months", singular: "monthly" };
+      default: return { period: "Day", periods: "Days", singular: "daily" };
+    }
+  };
+
+  const periodsPerYear = (cadence: "daily" | "monthly" | "quarterly") => {
+    switch (cadence) {
+      case "quarterly": return 4;
+      case "monthly": return 12;
+      default: return 252;
+    }
+  };
+
+  const portfolioCadenceLabels = cadenceLabel(portfolioCadence);
+
   const volatility = riskMetrics?.volatility ? parseFloat(riskMetrics.volatility) : 0;
   const sharpe = riskMetrics?.sharpeRatio ? parseFloat(riskMetrics.sharpeRatio) : 0;
   const sortino = riskMetrics?.sortinoRatio ? parseFloat(riskMetrics.sortinoRatio) : 0;
@@ -246,11 +280,14 @@ export default function RiskPage() {
     };
   });
 
+  // Use cadence-aware bucket widths: daily=0.5%, monthly=2%, quarterly=5%
+  const bucketWidth = portfolioCadence === "quarterly" ? 5 : portfolioCadence === "monthly" ? 2 : 0.5;
+  const bucketPrecision = portfolioCadence === "quarterly" ? 0 : portfolioCadence === "monthly" ? 0 : 1;
   const returnDistribution = performanceHistory.reduce((acc, p) => {
     if (p.dailyReturn) {
       const ret = parseFloat(p.dailyReturn) * 100;
-      const bucket = Math.round(ret * 2) / 2;
-      const bucketKey = bucket.toFixed(1);
+      const bucket = Math.round(ret / bucketWidth) * bucketWidth;
+      const bucketKey = bucket.toFixed(bucketPrecision);
       acc[bucketKey] = (acc[bucketKey] || 0) + 1;
     }
     return acc;
@@ -332,49 +369,53 @@ export default function RiskPage() {
     }
   });
 
-  // Calculate rolling alpha for 1-year (252 trading days) and 3-year (756 trading days)
-  // Uses compounded returns: (1+r1)*(1+r2)*...*(1+rn) - 1
-  const calculateRollingAlpha = (windowDays: number) => {
-    const sortedHistory = [...performanceHistory].sort((a, b) => 
+  // Calculate rolling alpha using cadence-aware window sizes
+  // Daily: 252/756 periods, Monthly: 12/36 periods, Quarterly: 4/12 periods
+  const ppYear = periodsPerYear(portfolioCadence);
+  const windowSize1Y = ppYear; // 1-year window in periods
+  const windowSize3Y = ppYear * 3; // 3-year window in periods
+
+  const calculateRollingAlpha = (windowPeriods: number) => {
+    const sortedHistory = [...performanceHistory].sort((a, b) =>
       new Date(a.date).getTime() - new Date(b.date).getTime()
     );
-    
+
     const result: { date: string; alpha: number; portfolioReturn: number; benchmarkReturn: number }[] = [];
-    
-    for (let i = windowDays - 1; i < sortedHistory.length; i++) {
-      const windowData = sortedHistory.slice(i - windowDays + 1, i + 1);
-      
+
+    for (let i = windowPeriods - 1; i < sortedHistory.length; i++) {
+      const windowData = sortedHistory.slice(i - windowPeriods + 1, i + 1);
+
       let portfolioCompounded = 1;
       let benchmarkCompounded = 1;
-      let matchedDays = 0;
-      
+      let matchedPeriods = 0;
+
       windowData.forEach(p => {
         const dateKey = new Date(p.date).toISOString().split('T')[0];
         const portfolioRet = p.dailyReturn ? parseFloat(p.dailyReturn) : 0;
-        
-        // Only include days where we have benchmark data
+
+        // Only include periods where we have benchmark data
         if (benchmarkReturnsByDate.has(dateKey)) {
           const benchRet = benchmarkReturnsByDate.get(dateKey) || 0;
           portfolioCompounded *= (1 + portfolioRet);
           benchmarkCompounded *= (1 + benchRet);
-          matchedDays++;
+          matchedPeriods++;
         }
       });
-      
-      // Skip if insufficient matched days (need at least 80% coverage)
-      const minRequiredDays = Math.floor(windowDays * 0.8);
-      if (matchedDays < minRequiredDays) continue;
-      
+
+      // Skip if insufficient matched periods (need at least 80% coverage)
+      const minRequired = Math.floor(windowPeriods * 0.8);
+      if (matchedPeriods < minRequired) continue;
+
       // Calculate cumulative returns over the window
       const portfolioCumReturn = portfolioCompounded - 1;
       const benchmarkCumReturn = benchmarkCompounded - 1;
-      
-      // Annualize using geometric annualization
-      const annualizationFactor = 252 / matchedDays;
-      const annualizedPortfolioReturn = Math.pow(1 + portfolioCumReturn, annualizationFactor) - 1;
-      const annualizedBenchmarkReturn = Math.pow(1 + benchmarkCumReturn, annualizationFactor) - 1;
+
+      // Annualize using geometric annualization based on actual cadence
+      const annFactor = ppYear / matchedPeriods;
+      const annualizedPortfolioReturn = Math.pow(1 + portfolioCumReturn, annFactor) - 1;
+      const annualizedBenchmarkReturn = Math.pow(1 + benchmarkCumReturn, annFactor) - 1;
       const rollingAlpha = annualizedPortfolioReturn - annualizedBenchmarkReturn;
-      
+
       result.push({
         date: formatDate(sortedHistory[i].date),
         alpha: rollingAlpha * 100,
@@ -382,12 +423,12 @@ export default function RiskPage() {
         benchmarkReturn: annualizedBenchmarkReturn * 100,
       });
     }
-    
+
     return result;
   };
 
-  const rolling1YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(252) : [];
-  const rolling3YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(756) : [];
+  const rolling1YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(windowSize1Y) : [];
+  const rolling3YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(windowSize3Y) : [];
 
   return (
     <div className="space-y-6">
@@ -431,28 +472,34 @@ export default function RiskPage() {
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <MetricCard
-          title="Sharpe Ratio"
+          title={`Sharpe Ratio${data?.isCustomPortfolio ? " *" : ""}`}
           value={sharpe.toFixed(2)}
           icon={<Shield className="h-5 w-5" />}
           changeLabel={riskLevel.level}
         />
         <MetricCard
-          title="Volatility"
+          title={`Volatility${data?.isCustomPortfolio ? " *" : ""}`}
           value={formatPercent(volatility)}
           icon={<Activity className="h-5 w-5" />}
         />
         <MetricCard
-          title="Max Drawdown"
+          title={`Max Drawdown${data?.isCustomPortfolio ? " *" : ""}`}
           value={formatPercent(maxDrawdown)}
           icon={<TrendingDown className="h-5 w-5" />}
           valueClassName="text-red-500"
         />
         <MetricCard
-          title="VaR (95%)"
+          title={`VaR (95%)${data?.isCustomPortfolio ? " *" : ""}`}
           value={formatVaR(var95, !!data?.isCustomPortfolio)}
           icon={<AlertTriangle className="h-5 w-5" />}
         />
       </div>
+
+      {data?.isCustomPortfolio && (
+        <p className="text-xs text-muted-foreground -mt-3">
+          * Metrics derived from Monte Carlo simulation using synthetic returns. Asset class parameters (expected return, volatility) are used to generate {performanceHistory.length > 0 ? "simulated" : ""} daily return paths. Results represent the median of 100 simulated scenarios and should be interpreted as estimates, not historical performance.
+        </p>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card data-testid="card-drawdown-chart">
@@ -506,8 +553,8 @@ export default function RiskPage() {
 
         <Card data-testid="card-return-distribution">
           <CardHeader>
-            <CardTitle className="text-base font-medium">Return Distribution</CardTitle>
-            <CardDescription>Frequency of daily returns</CardDescription>
+            <CardTitle className="text-base font-medium">Return Distribution{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+            <CardDescription>Frequency of {portfolioCadenceLabels.singular} returns{data?.isCustomPortfolio ? " (simulated)" : ""}</CardDescription>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={280}>
@@ -532,7 +579,7 @@ export default function RiskPage() {
                     borderRadius: "6px",
                     fontSize: 12,
                   }}
-                  formatter={(value: number) => [value, "Days"]}
+                  formatter={(value: number) => [value, portfolioCadenceLabels.periods]}
                 />
                 <ReferenceLine x="0.0%" stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
                 <Bar 
@@ -582,8 +629,8 @@ export default function RiskPage() {
           <CardHeader>
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div>
-                <CardTitle className="text-base font-medium">Risk Metrics</CardTitle>
-                <CardDescription>Comprehensive risk indicators</CardDescription>
+                <CardTitle className="text-base font-medium">Risk Metrics{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+                <CardDescription>Comprehensive risk indicators{data?.isCustomPortfolio ? " (derived from simulated returns)" : ""}</CardDescription>
               </div>
               <Badge 
                 variant="secondary" 
@@ -612,8 +659,8 @@ export default function RiskPage() {
 
       <Card data-testid="card-performance-ratios">
         <CardHeader>
-          <CardTitle className="text-base font-medium">Performance & Risk-Adjusted Ratios</CardTitle>
-          <CardDescription>Key investment performance metrics relative to risk</CardDescription>
+          <CardTitle className="text-base font-medium">Performance & Risk-Adjusted Ratios{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+          <CardDescription>Key investment performance metrics relative to risk{data?.isCustomPortfolio ? " (derived from simulated returns)" : ""}</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -633,8 +680,8 @@ export default function RiskPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <Card data-testid="card-alternative-metrics">
           <CardHeader>
-            <CardTitle className="text-base font-medium">Alternative Investment Metrics</CardTitle>
-            <CardDescription>Specialized metrics for hedge funds, private equity, and alternatives</CardDescription>
+            <CardTitle className="text-base font-medium">Alternative Investment Metrics{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+            <CardDescription>Specialized metrics for hedge funds, private equity, and alternatives{data?.isCustomPortfolio ? " (simulated)" : ""}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -653,8 +700,8 @@ export default function RiskPage() {
 
         <Card data-testid="card-tail-risk">
           <CardHeader>
-            <CardTitle className="text-base font-medium">Tail Risk & Distribution</CardTitle>
-            <CardDescription>Return distribution characteristics and extreme event analysis</CardDescription>
+            <CardTitle className="text-base font-medium">Tail Risk & Distribution{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+            <CardDescription>Return distribution characteristics and extreme event analysis{data?.isCustomPortfolio ? " (simulated)" : ""}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -760,7 +807,7 @@ export default function RiskPage() {
                   </ResponsiveContainer>
                 ) : (
                   <div className="flex items-center justify-center h-[220px] text-muted-foreground text-sm">
-                    Insufficient data for 1-year rolling alpha (requires 252+ trading days)
+                    Insufficient data for 1-year rolling alpha (requires {windowSize1Y}+ {portfolioCadenceLabels.singular} data points)
                   </div>
                 )}
               </div>
@@ -808,7 +855,7 @@ export default function RiskPage() {
                   </ResponsiveContainer>
                 ) : (
                   <div className="flex items-center justify-center h-[220px] text-muted-foreground text-sm">
-                    Insufficient data for 3-year rolling alpha (requires 756+ trading days)
+                    Insufficient data for 3-year rolling alpha (requires {windowSize3Y}+ {portfolioCadenceLabels.singular} data points)
                   </div>
                 )}
               </div>
@@ -816,6 +863,18 @@ export default function RiskPage() {
           )}
         </CardContent>
       </Card>
+
+      {data?.isCustomPortfolio && (
+        <div className="rounded-lg border border-dashed p-4 space-y-2">
+          <p className="text-xs font-medium text-muted-foreground">* Synthetic / Backtested Data Disclosure</p>
+          <p className="text-xs text-muted-foreground">
+            All risk metrics, ratios, and return distributions marked with (*) for this custom portfolio are derived from a Monte Carlo simulation
+            using synthetically generated daily returns. The simulation runs 100 independent paths based on asset-class-level expected returns
+            and volatilities (e.g., US Equity: 10% return, 16% volatility). Where historical returns have been uploaded for linked strategies,
+            bootstrap sampling from actual returns is used instead. These results are estimates and should not be interpreted as actual historical performance.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
