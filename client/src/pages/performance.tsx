@@ -1,9 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
-import { AlertTriangle, TrendingUp, Activity, Target } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { MetricCard } from "@/components/metric-card";
 import { ChartSkeleton, MetricCardSkeleton } from "@/components/loading-skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -95,7 +94,7 @@ export default function PerformancePage() {
     ? selectedBenchmarkId.replace("composite-", "")
     : selectedBenchmarkId;
 
-  const { data: globalBenchmarkReturns } = useQuery<{ returns: any[] }>({
+  const { data: globalBenchmarkReturns } = useQuery<{ returns: any[]; metrics?: { totalReturn: number; annualizedReturn: number; annualizedVolatility: number; periodCount: number } }>({
     queryKey: [
       isCompositeBenchmark ? "/api/composite-benchmarks" : "/api/benchmarks",
       benchmarkApiId,
@@ -253,6 +252,47 @@ export default function PerformancePage() {
   }
 
   const benchmarkDisplayName = selectedBenchmark?.name || "Benchmark";
+  const benchmarkTicker = selectedBenchmark?.ticker !== "CUSTOM" ? selectedBenchmark?.ticker : null;
+
+  // Compute benchmark period stats from the fetched returns
+  const benchmarkMetrics = globalBenchmarkReturns?.metrics;
+  let benchmarkAnnualizedReturn = 0;
+  let benchmarkBestDay = 0;
+  let benchmarkWorstDay = 0;
+  let benchmarkPositiveDays = 0;
+  let benchmarkVolatility = 0;
+  let benchmarkTotalDays = 0;
+
+  if (benchmarkMetrics) {
+    benchmarkAnnualizedReturn = benchmarkMetrics.annualizedReturn;
+    benchmarkVolatility = benchmarkMetrics.annualizedVolatility;
+  }
+
+  if (sortedBenchmarkReturns.length > 0) {
+    const benchDailyReturns = sortedBenchmarkReturns.map((r: any) =>
+      parseFloat(r.returnValue || "0")
+    );
+    benchmarkBestDay = Math.max(...benchDailyReturns);
+    benchmarkWorstDay = Math.min(...benchDailyReturns);
+    benchmarkPositiveDays = benchDailyReturns.filter((r: number) => r > 0).length;
+    benchmarkTotalDays = benchDailyReturns.length;
+
+    // Fallback: compute annualized volatility if not provided by API
+    if (!benchmarkMetrics && benchDailyReturns.length > 1) {
+      const mean = benchDailyReturns.reduce((a: number, b: number) => a + b, 0) / benchDailyReturns.length;
+      const variance = benchDailyReturns.reduce((sum: number, r: number) => sum + Math.pow(r - mean, 2), 0) / (benchDailyReturns.length - 1);
+      benchmarkVolatility = Math.sqrt(variance) * Math.sqrt(252);
+    }
+  }
+
+  // Compute portfolio volatility from daily returns
+  let portfolioVolatility = 0;
+  if (performanceHistory.length > 1) {
+    const dailyReturnsArr = performanceHistory.map(p => parseFloat(p.dailyReturn || "0"));
+    const mean = dailyReturnsArr.reduce((a, b) => a + b, 0) / dailyReturnsArr.length;
+    const variance = dailyReturnsArr.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (dailyReturnsArr.length - 1);
+    portfolioVolatility = Math.sqrt(variance) * Math.sqrt(252);
+  }
 
   // Build chart data with portfolio and globally selected benchmark joined by date
   const returnChart = performanceHistory.map((p) => {
@@ -306,31 +346,91 @@ export default function PerformancePage() {
         )}
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <MetricCard
-          title={`${getTimePeriodLabel(selectedTimePeriod)} Return`}
-          value={formatPercent(periodTotalReturn)}
-          icon={<TrendingUp className="h-5 w-5" />}
-          valueClassName={periodTotalReturn >= 0 ? "text-emerald-500" : "text-red-500"}
-        />
-        <MetricCard
-          title="Annualized Return"
-          value={formatPercent(periodAnnualizedReturn)}
-          icon={<Activity className="h-5 w-5" />}
-          valueClassName={periodAnnualizedReturn >= 0 ? "text-emerald-500" : "text-red-500"}
-        />
-        <MetricCard
-          title="Alpha vs Benchmark"
-          value={formatPercent(periodAlpha)}
-          icon={<Target className="h-5 w-5" />}
-          valueClassName={periodAlpha >= 0 ? "text-emerald-500" : "text-red-500"}
-        />
-        <MetricCard
-          title="Win Rate"
-          value={performanceHistory.length > 0 ? `${((periodPositiveDays / performanceHistory.length) * 100).toFixed(1)}%` : "—"}
-          changeLabel={`${periodPositiveDays}/${performanceHistory.length} days`}
-        />
-      </div>
+      <Card data-testid="card-performance-comparison">
+        <CardContent className="p-0">
+          <div className="grid grid-cols-[1fr_auto_auto_auto] items-center text-sm">
+            {/* Header row */}
+            <div className="px-5 py-3 border-b font-medium text-muted-foreground">Metric</div>
+            <div className="px-5 py-3 border-b border-l text-center font-medium text-muted-foreground min-w-[120px]">Portfolio</div>
+            <div className="px-5 py-3 border-b border-l text-center font-medium min-w-[120px]" style={{ color: selectedBenchmark?.color || "#6366f1" }}>
+              {benchmarkTicker || benchmarkDisplayName}
+            </div>
+            <div className="px-5 py-3 border-b border-l text-center font-medium text-muted-foreground min-w-[100px]">Difference</div>
+
+            {/* Period Return */}
+            <div className="px-5 py-3 border-b text-muted-foreground">{getTimePeriodLabel(selectedTimePeriod)} Return</div>
+            <div className={`px-5 py-3 border-b border-l text-center font-mono font-semibold ${periodTotalReturn >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {formatPercent(periodTotalReturn)}
+            </div>
+            <div className={`px-5 py-3 border-b border-l text-center font-mono ${periodBenchmarkReturn >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {formatPercent(periodBenchmarkReturn)}
+            </div>
+            <div className={`px-5 py-3 border-b border-l text-center font-mono font-medium ${periodAlpha >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {periodAlpha >= 0 ? "+" : ""}{formatPercent(periodAlpha)}
+            </div>
+
+            {/* Annualized Return */}
+            <div className="px-5 py-3 border-b text-muted-foreground">Annualized Return</div>
+            <div className={`px-5 py-3 border-b border-l text-center font-mono font-semibold ${periodAnnualizedReturn >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {formatPercent(periodAnnualizedReturn)}
+            </div>
+            <div className={`px-5 py-3 border-b border-l text-center font-mono ${benchmarkAnnualizedReturn >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {benchmarkAnnualizedReturn !== 0 ? formatPercent(benchmarkAnnualizedReturn) : "—"}
+            </div>
+            <div className={`px-5 py-3 border-b border-l text-center font-mono font-medium ${(periodAnnualizedReturn - benchmarkAnnualizedReturn) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {benchmarkAnnualizedReturn !== 0
+                ? `${(periodAnnualizedReturn - benchmarkAnnualizedReturn) >= 0 ? "+" : ""}${formatPercent(periodAnnualizedReturn - benchmarkAnnualizedReturn)}`
+                : "—"}
+            </div>
+
+            {/* Volatility */}
+            <div className="px-5 py-3 border-b text-muted-foreground">Annualized Volatility</div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono font-semibold">
+              {portfolioVolatility > 0 ? formatPercent(portfolioVolatility) : "—"}
+            </div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono">
+              {benchmarkVolatility > 0 ? formatPercent(benchmarkVolatility) : "—"}
+            </div>
+            <div className={`px-5 py-3 border-b border-l text-center font-mono font-medium ${portfolioVolatility > 0 && benchmarkVolatility > 0 ? ((portfolioVolatility - benchmarkVolatility) <= 0 ? "text-emerald-500" : "text-red-500") : ""}`}>
+              {portfolioVolatility > 0 && benchmarkVolatility > 0
+                ? `${(portfolioVolatility - benchmarkVolatility) <= 0 ? "" : "+"}${formatPercent(portfolioVolatility - benchmarkVolatility)}`
+                : "—"}
+            </div>
+
+            {/* Best Day */}
+            <div className="px-5 py-3 border-b text-muted-foreground">Best Day</div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono font-semibold text-emerald-500">
+              +{formatPercent(periodBestDay)}
+            </div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono text-emerald-500">
+              {benchmarkBestDay !== 0 ? `+${formatPercent(benchmarkBestDay)}` : "—"}
+            </div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono font-medium text-muted-foreground">—</div>
+
+            {/* Worst Day */}
+            <div className="px-5 py-3 border-b text-muted-foreground">Worst Day</div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono font-semibold text-red-500">
+              {formatPercent(periodWorstDay)}
+            </div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono text-red-500">
+              {benchmarkWorstDay !== 0 ? formatPercent(benchmarkWorstDay) : "—"}
+            </div>
+            <div className="px-5 py-3 border-b border-l text-center font-mono font-medium text-muted-foreground">—</div>
+
+            {/* Win Rate */}
+            <div className="px-5 py-3 text-muted-foreground">Positive Days</div>
+            <div className="px-5 py-3 border-l text-center font-mono font-semibold">
+              {performanceHistory.length > 0 ? `${((periodPositiveDays / performanceHistory.length) * 100).toFixed(1)}%` : "—"}
+              <span className="text-muted-foreground text-xs ml-1">({periodPositiveDays}/{performanceHistory.length})</span>
+            </div>
+            <div className="px-5 py-3 border-l text-center font-mono">
+              {benchmarkTotalDays > 0 ? `${((benchmarkPositiveDays / benchmarkTotalDays) * 100).toFixed(1)}%` : "—"}
+              {benchmarkTotalDays > 0 && <span className="text-muted-foreground text-xs ml-1">({benchmarkPositiveDays}/{benchmarkTotalDays})</span>}
+            </div>
+            <div className="px-5 py-3 border-l text-center font-mono font-medium text-muted-foreground">—</div>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card data-testid="card-cumulative-performance">
         <CardHeader>
@@ -429,26 +529,26 @@ export default function PerformancePage() {
                     labelFormatter={(label, payload) => payload[0]?.payload?.fullDate || label}
                     formatter={(value: number, name: string) => [
                       formatCurrency(value),
-                      name === "portfolio" ? "Portfolio" : "Benchmark"
+                      name === "portfolio" ? "Portfolio" : benchmarkDisplayName
                     ]}
                   />
                   <Legend />
-                  <Line 
-                    type="monotone" 
-                    dataKey="portfolio" 
-                    stroke="hsl(var(--chart-1))" 
+                  <Line
+                    type="monotone"
+                    dataKey="portfolio"
+                    stroke="hsl(var(--chart-1))"
                     strokeWidth={2}
                     dot={false}
                     name="Portfolio"
                   />
-                  <Line 
-                    type="monotone" 
-                    dataKey="benchmark" 
-                    stroke="hsl(var(--muted-foreground))" 
+                  <Line
+                    type="monotone"
+                    dataKey="benchmark"
+                    stroke={selectedBenchmark?.color || "hsl(var(--muted-foreground))"}
                     strokeWidth={1.5}
                     strokeDasharray="4 4"
                     dot={false}
-                    name="Default Benchmark"
+                    name={benchmarkDisplayName}
                   />
                 </LineChart>
               </ResponsiveContainer>
@@ -457,91 +557,48 @@ export default function PerformancePage() {
         </CardContent>
       </Card>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card data-testid="card-daily-returns">
-          <CardHeader>
-            <CardTitle className="text-base font-medium">Daily Returns</CardTitle>
-            <CardDescription>Last 90 days of daily performance</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={280}>
-              <ComposedChart data={dailyReturnChart}>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                <XAxis 
-                  dataKey="date" 
-                  stroke="hsl(var(--muted-foreground))"
-                  fontSize={10}
-                  tickLine={false}
-                  interval="preserveStartEnd"
-                />
-                <YAxis 
-                  stroke="hsl(var(--muted-foreground))"
-                  fontSize={11}
-                  tickLine={false}
-                  tickFormatter={(v) => `${v.toFixed(1)}%`}
-                />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: "hsl(var(--card))", 
-                    border: "1px solid hsl(var(--border))",
-                    borderRadius: "6px",
-                    fontSize: 12,
-                  }}
-                  labelFormatter={(label, payload) => payload[0]?.payload?.fullDate || label}
-                  formatter={(value: number) => [`${value.toFixed(3)}%`, "Daily Return"]}
-                />
-                <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" />
-                <Bar 
-                  dataKey="daily" 
-                  fill="hsl(var(--chart-1))"
-                  radius={[2, 2, 0, 0]}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        <Card data-testid="card-performance-stats">
-          <CardHeader>
-            <CardTitle className="text-base font-medium">Performance Statistics</CardTitle>
-            <CardDescription>Key performance indicators for {getTimePeriodLabel(selectedTimePeriod)}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-4">
-              <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">Best Day</span>
-                <span className="font-mono text-sm text-emerald-500">
-                  +{formatPercent(periodBestDay)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">Worst Day</span>
-                <span className="font-mono text-sm text-red-500">
-                  {formatPercent(periodWorstDay)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">{benchmarkDisplayName} Return</span>
-                <span className={`font-mono text-sm ${periodBenchmarkReturn >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                  {periodBenchmarkReturn >= 0 ? "+" : ""}{formatPercent(periodBenchmarkReturn)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">Alpha vs {benchmarkDisplayName}</span>
-                <span className={`font-mono text-sm ${periodAlpha >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                  {periodAlpha >= 0 ? "+" : ""}{formatPercent(periodAlpha)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between py-3">
-                <span className="text-sm text-muted-foreground">Positive Days</span>
-                <span className="font-mono text-sm">
-                  {periodPositiveDays} / {performanceHistory.length}
-                </span>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      <Card data-testid="card-daily-returns">
+        <CardHeader>
+          <CardTitle className="text-base font-medium">Daily Returns</CardTitle>
+          <CardDescription>Last 90 days of daily performance</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ResponsiveContainer width="100%" height={280}>
+            <ComposedChart data={dailyReturnChart}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+              <XAxis
+                dataKey="date"
+                stroke="hsl(var(--muted-foreground))"
+                fontSize={10}
+                tickLine={false}
+                interval="preserveStartEnd"
+              />
+              <YAxis
+                stroke="hsl(var(--muted-foreground))"
+                fontSize={11}
+                tickLine={false}
+                tickFormatter={(v) => `${v.toFixed(1)}%`}
+              />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "hsl(var(--card))",
+                  border: "1px solid hsl(var(--border))",
+                  borderRadius: "6px",
+                  fontSize: 12,
+                }}
+                labelFormatter={(label, payload) => payload[0]?.payload?.fullDate || label}
+                formatter={(value: number) => [`${value.toFixed(3)}%`, "Daily Return"]}
+              />
+              <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" />
+              <Bar
+                dataKey="daily"
+                fill="hsl(var(--chart-1))"
+                radius={[2, 2, 0, 0]}
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </CardContent>
+      </Card>
 
     </div>
   );
