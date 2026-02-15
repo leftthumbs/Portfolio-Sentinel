@@ -43,7 +43,7 @@ const strategyTypes = [
   "Hedge Fund",
   "Private Equity",
   "Venture Capital",
-  "Real Estate Fund",
+  "Real Assets Fund",
   "Credit Strategy",
   "Macro Strategy",
   "Long/Short Equity",
@@ -309,25 +309,38 @@ export default function StrategyLibraryPage() {
       // Store extracted returns for import after strategy is created
       setExtractedReturns(historicalReturns);
       
-      // Update form with extracted values, using existing defaults for nulls
-      // Volatility is now calculated from historical returns, not from "expected" value
       setForm(prev => ({
         name: extracted.name || prev.name,
         ticker: extracted.ticker || prev.ticker,
         strategyType: strategyTypes.includes(extracted.strategyType) ? extracted.strategyType : prev.strategyType,
         assetClass: assetClasses.includes(extracted.assetClass) ? extracted.assetClass : prev.assetClass,
         description: extracted.description || prev.description,
-        expectedReturn: prev.expectedReturn, // Keep default - calculated from historical if needed
-        volatility: extracted.volatility !== null ? String(extracted.volatility.toFixed(4)) : prev.volatility,
+        expectedReturn: extracted.expectedReturn != null ? String(Number(extracted.expectedReturn).toFixed(4)) : prev.expectedReturn,
+        volatility: extracted.volatility != null ? String(Number(extracted.volatility).toFixed(4)) : prev.volatility,
       }));
       
-      const returnsMsg = historicalReturns.length > 0 
-        ? ` Found ${historicalReturns.length} historical return records that will be imported.`
-        : "";
+      const details: string[] = [];
+      const returnFrequency = data.returnFrequency;
+      if (historicalReturns.length > 0) {
+        const freqLabel = returnFrequency ? ` (${returnFrequency})` : "";
+        details.push(`${historicalReturns.length} historical return records found${freqLabel}`);
+      }
+      if (extracted.expectedReturnSource === "calculated") {
+        details.push("Expected return calculated from historical data");
+      } else if (extracted.expectedReturnSource === "document") {
+        details.push("Expected return extracted from document text");
+      }
+      if (extracted.volatilitySource === "calculated") {
+        details.push("Volatility calculated from historical data");
+      } else if (extracted.volatilitySource === "document") {
+        details.push("Volatility extracted from document text");
+      }
+      
+      const detailMsg = details.length > 0 ? " " + details.join(". ") + "." : "";
       
       toast({ 
         title: "Information extracted", 
-        description: `Form fields have been populated from the document.${returnsMsg} Please review and adjust as needed.` 
+        description: `Form fields populated from the document.${detailMsg} Please review and adjust as needed.` 
       });
     } catch (error: any) {
       toast({ 

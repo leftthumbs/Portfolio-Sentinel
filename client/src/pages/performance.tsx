@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
@@ -45,11 +45,13 @@ import {
   ReferenceLine,
   ComposedChart,
   Bar,
+  Cell,
   Legend,
 } from "recharts";
 import type { Portfolio, PerformanceHistory, Benchmark, BenchmarkReturn } from "@shared/schema";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { detectDataFrequency, formatDateForFrequency, formatDateFullForFrequency, getFrequencyLabel, getPeriodLabel, getRecentPeriodCount, getXAxisTickInterval } from "@/lib/data-frequency";
 
 interface SelectedBenchmarkData {
   benchmark: Benchmark;
@@ -105,16 +107,41 @@ const BENCHMARK_COLORS = [
   "#14b8a6",
 ];
 
+function getStoredBenchmarkIds(portfolioKey: string): string[] {
+  try {
+    const stored = localStorage.getItem(`perf_benchmarks_${portfolioKey}`);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+function setStoredBenchmarkIds(portfolioKey: string, ids: string[]) {
+  localStorage.setItem(`perf_benchmarks_${portfolioKey}`, JSON.stringify(ids));
+}
+
 export default function PerformancePage() {
   const { toast } = useToast();
-  const { selectedPortfolioId, selectedPortfolioType, selectedTimePeriod } = usePortfolio();
+  const { selectedPortfolioId, selectedPortfolioType, selectedTimePeriod, selectedBenchmarkId } = usePortfolio();
 
-  const performanceUrl = selectedPortfolioId 
-    ? `/api/performance?portfolioId=${selectedPortfolioId}&portfolioType=${selectedPortfolioType}`
-    : "/api/performance";
+  const perfParams = new URLSearchParams();
+  if (selectedPortfolioId) {
+    perfParams.set("portfolioId", selectedPortfolioId);
+    perfParams.set("portfolioType", selectedPortfolioType);
+  }
+  if (selectedBenchmarkId) {
+    perfParams.set("benchmarkId", selectedBenchmarkId);
+  }
+  const performanceUrl = `/api/performance?${perfParams.toString()}`;
+
+  const portfolioKey = selectedPortfolioId 
+    ? `${selectedPortfolioType}_${selectedPortfolioId}` 
+    : "default";
+
+  const [localBenchmarkIds, setLocalBenchmarkIds] = useState<string[]>(() => getStoredBenchmarkIds(portfolioKey));
 
   const { data, isLoading, error, refetch } = useQuery<PerformanceData & { isCustomPortfolio?: boolean }>({
-    queryKey: ["/api/performance", selectedPortfolioId, selectedPortfolioType],
+    queryKey: ["/api/performance", selectedPortfolioId, selectedPortfolioType, selectedBenchmarkId],
     queryFn: async () => {
       const res = await fetch(performanceUrl, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch performance data");
@@ -126,34 +153,72 @@ export default function PerformancePage() {
     queryKey: ["/api/benchmarks"],
   });
 
-  const addBenchmarkMutation = useMutation({
-    mutationFn: async (benchmarkId: string) => {
-      await apiRequest("POST", `/api/portfolios/${data?.portfolio?.id}/benchmarks`, {
-        benchmarkId,
-        isPrimary: false,
-      });
+  useEffect(() => {
+    const stored = getStoredBenchmarkIds(portfolioKey);
+    if (benchmarksData?.benchmarks) {
+      const validIds = new Set(benchmarksData.benchmarks.map(b => b.id));
+      const filtered = stored.filter(id => validIds.has(id));
+      if (filtered.length !== stored.length) {
+        setStoredBenchmarkIds(portfolioKey, filtered);
+      }
+      setLocalBenchmarkIds(filtered);
+    } else {
+      setLocalBenchmarkIds(stored);
+    }
+  }, [portfolioKey, benchmarksData]);
+
+  const { data: benchmarkReturnsMap } = useQuery<Record<string, SelectedBenchmarkData>>({
+    queryKey: ["/api/benchmark-returns-multi", localBenchmarkIds],
+    queryFn: async () => {
+      if (localBenchmarkIds.length === 0) return {};
+      const allBenchmarks = benchmarksData?.benchmarks || [];
+      const results: Record<string, SelectedBenchmarkData> = {};
+      
+      await Promise.all(
+        localBenchmarkIds.map(async (id) => {
+          try {
+            const returnsRes = await fetch(`/api/benchmarks/${id}/returns`, { credentials: "include" });
+            if (returnsRes.ok) {
+              const { returns } = await returnsRes.json();
+              const benchmark = allBenchmarks.find(b => b.id === id);
+              if (benchmark) {
+                results[id] = { benchmark, returns };
+              }
+            }
+          } catch { /* skip failed benchmarks */ }
+        })
+      );
+      return results;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/performance"] });
-      toast({ title: "Benchmark added", description: "Benchmark has been added to comparison" });
-    },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to add benchmark", variant: "destructive" });
-    },
+    enabled: localBenchmarkIds.length > 0 && !!benchmarksData,
   });
 
-  const removeBenchmarkMutation = useMutation({
-    mutationFn: async (benchmarkId: string) => {
-      await apiRequest("DELETE", `/api/portfolios/${data?.portfolio?.id}/benchmarks/${benchmarkId}`);
+  const { data: globalBenchmarkReturns } = useQuery<{ returns: BenchmarkReturn[] }>({
+    queryKey: ["/api/benchmarks", selectedBenchmarkId, "returns"],
+    queryFn: async () => {
+      const res = await fetch(`/api/benchmarks/${selectedBenchmarkId}/returns`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch benchmark returns");
+      return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/performance"] });
-      toast({ title: "Benchmark removed", description: "Benchmark has been removed from comparison" });
-    },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to remove benchmark", variant: "destructive" });
-    },
+    enabled: !!selectedBenchmarkId,
   });
+
+  const handleAddBenchmark = (benchmarkId: string) => {
+    if (localBenchmarkIds.includes(benchmarkId)) return;
+    const updated = [...localBenchmarkIds, benchmarkId];
+    setLocalBenchmarkIds(updated);
+    setStoredBenchmarkIds(portfolioKey, updated);
+    queryClient.invalidateQueries({ queryKey: ["/api/benchmark-returns-multi"] });
+    toast({ title: "Benchmark added", description: "Benchmark has been added to comparison" });
+  };
+
+  const handleRemoveBenchmark = (benchmarkId: string) => {
+    const updated = localBenchmarkIds.filter(id => id !== benchmarkId);
+    setLocalBenchmarkIds(updated);
+    setStoredBenchmarkIds(portfolioKey, updated);
+    queryClient.invalidateQueries({ queryKey: ["/api/benchmark-returns-multi"] });
+    toast({ title: "Benchmark removed", description: "Benchmark has been removed from comparison" });
+  };
 
   const [compositeDialogOpen, setCompositeDialogOpen] = useState(false);
   const [compositeName, setCompositeName] = useState("");
@@ -228,7 +293,10 @@ export default function PerformancePage() {
     );
   }
 
-  const { portfolio, performanceHistory: rawPerformanceHistory, selectedBenchmarks = [], metrics } = data;
+  const { portfolio, performanceHistory: rawPerformanceHistory, metrics } = data;
+  const selectedBenchmarks: SelectedBenchmarkData[] = benchmarkReturnsMap 
+    ? Object.values(benchmarkReturnsMap) 
+    : [];
   
   const inceptionDate = rawPerformanceHistory.length > 0 
     ? new Date(rawPerformanceHistory[0].date) 
@@ -238,6 +306,10 @@ export default function PerformancePage() {
   const performanceHistory = rawPerformanceHistory.filter(
     (p) => new Date(p.date) >= startDate
   );
+
+  const dataFrequency = detectDataFrequency(performanceHistory.map(p => p.date));
+  const periodLabel = getPeriodLabel(dataFrequency);
+  const frequencyLabel = getFrequencyLabel(dataFrequency);
 
   const firstInPeriod = performanceHistory[0];
   const lastInPeriod = performanceHistory[performanceHistory.length - 1];
@@ -265,17 +337,45 @@ export default function PerformancePage() {
     periodWorstDay = Math.min(...dailyReturns);
     periodPositiveDays = dailyReturns.filter(r => r > 0).length;
     
-    const startBenchmarkValue = firstInPeriod.benchmarkValue ? parseFloat(firstInPeriod.benchmarkValue) : startValue;
-    const endBenchmarkValue = lastInPeriod.benchmarkValue ? parseFloat(lastInPeriod.benchmarkValue) : endValue;
-    periodBenchmarkReturn = startBenchmarkValue > 0 ? (endBenchmarkValue - startBenchmarkValue) / startBenchmarkValue : 0;
-    periodAlpha = periodTotalReturn - periodBenchmarkReturn;
+    const gbReturns = globalBenchmarkReturns?.returns || [];
+    if (gbReturns.length > 0) {
+      const sortedBR = [...gbReturns]
+        .filter(r => new Date(r.date) >= startDate)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      if (sortedBR.length >= 2) {
+        const firstBR = sortedBR[0];
+        const lastBR = sortedBR[sortedBR.length - 1];
+        const startCum = firstBR.cumulativeReturn ? parseFloat(firstBR.cumulativeReturn) : 0;
+        const endCum = lastBR.cumulativeReturn ? parseFloat(lastBR.cumulativeReturn) : 0;
+        periodBenchmarkReturn = (1 + endCum) / (1 + startCum) - 1;
+
+        const benchStartDate = new Date(firstBR.date);
+        const benchEndDate = new Date(lastBR.date);
+        const overlapHistory = performanceHistory.filter(p => {
+          const d = new Date(p.date);
+          return d >= benchStartDate && d <= benchEndDate;
+        });
+        if (overlapHistory.length >= 2) {
+          const overlapStartVal = parseFloat(overlapHistory[0].portfolioValue);
+          const overlapEndVal = parseFloat(overlapHistory[overlapHistory.length - 1].portfolioValue);
+          const overlapReturn = overlapStartVal > 0 ? (overlapEndVal - overlapStartVal) / overlapStartVal : 0;
+          periodAlpha = overlapReturn - periodBenchmarkReturn;
+        } else {
+          periodAlpha = periodTotalReturn - periodBenchmarkReturn;
+        }
+      }
+    } else {
+      const startBenchmarkValue = firstInPeriod.benchmarkValue ? parseFloat(firstInPeriod.benchmarkValue) : startValue;
+      const endBenchmarkValue = lastInPeriod.benchmarkValue ? parseFloat(lastInPeriod.benchmarkValue) : endValue;
+      periodBenchmarkReturn = startBenchmarkValue > 0 ? (endBenchmarkValue - startBenchmarkValue) / startBenchmarkValue : 0;
+      periodAlpha = periodTotalReturn - periodBenchmarkReturn;
+    }
   }
 
   const allBenchmarks = benchmarksData?.benchmarks || [];
   const compositeList = compositeBenchmarksData?.compositeBenchmarks || [];
-  const selectedBenchmarkIds = selectedBenchmarks.map(sb => sb.benchmark.id);
-  const availableBenchmarks = allBenchmarks.filter(b => !selectedBenchmarkIds.includes(b.id));
-  const availableCompositeBenchmarks = compositeList.filter(b => !selectedBenchmarkIds.includes(b.id));
+  const availableBenchmarks = allBenchmarks.filter(b => !localBenchmarkIds.includes(b.id));
+  const availableCompositeBenchmarks = compositeList.filter(b => !localBenchmarkIds.includes(b.id));
 
   const categoryOrder = ["Custom", "Equity", "Fixed Income", "Real Estate", "Commodities", "Alternative", "Multi-Asset"];
   
@@ -325,8 +425,8 @@ export default function PerformancePage() {
   const returnChart = performanceHistory.map((p) => {
     const dateKey = new Date(p.date).toISOString().split('T')[0];
     const chartPoint: Record<string, any> = {
-      date: formatDate(p.date),
-      fullDate: formatDateFull(p.date),
+      date: formatDateForFrequency(p.date, dataFrequency),
+      fullDate: formatDateFullForFrequency(p.date, dataFrequency),
       portfolio: p.cumulativeReturn ? parseFloat(p.cumulativeReturn) * 100 : 0,
       defaultBenchmark: p.benchmarkReturn ? parseFloat(p.benchmarkReturn) * 100 : 0,
     };
@@ -344,15 +444,17 @@ export default function PerformancePage() {
   });
 
   const valueChart = performanceHistory.map((p) => ({
-    date: formatDate(p.date),
-    fullDate: formatDateFull(p.date),
+    date: formatDateForFrequency(p.date, dataFrequency),
+    fullDate: formatDateFullForFrequency(p.date, dataFrequency),
     portfolio: parseFloat(p.portfolioValue),
     benchmark: p.benchmarkValue ? parseFloat(p.benchmarkValue) : null,
   }));
 
-  const dailyReturnChart = performanceHistory.slice(-90).map((p) => ({
-    date: formatDate(p.date),
-    fullDate: formatDateFull(p.date),
+  const recentCount = getRecentPeriodCount(dataFrequency);
+  const periodReturnData = performanceHistory.slice(-recentCount);
+  const dailyReturnChart = periodReturnData.map((p) => ({
+    date: formatDateForFrequency(p.date, dataFrequency),
+    fullDate: formatDateFullForFrequency(p.date, dataFrequency),
     daily: p.dailyReturn ? parseFloat(p.dailyReturn) * 100 : 0,
   }));
 
@@ -376,7 +478,7 @@ export default function PerformancePage() {
             >
               <span className="text-xs">{sb.benchmark.ticker || sb.benchmark.name}</span>
               <button 
-                onClick={() => removeBenchmarkMutation.mutate(sb.benchmark.id)}
+                onClick={() => handleRemoveBenchmark(sb.benchmark.id)}
                 className="ml-1 hover:text-destructive"
                 data-testid={`button-remove-benchmark-${sb.benchmark.id}`}
               >
@@ -419,7 +521,7 @@ export default function PerformancePage() {
                                 description: "Use the Risk Analytics page to compare against custom benchmarks for rolling alpha analysis."
                               });
                             } else {
-                              addBenchmarkMutation.mutate(benchmark.id);
+                              handleAddBenchmark(benchmark.id);
                             }
                           }}
                           data-testid={`menu-item-benchmark-${benchmark.id}`}
@@ -475,7 +577,7 @@ export default function PerformancePage() {
         <MetricCard
           title="Win Rate"
           value={performanceHistory.length > 0 ? `${((periodPositiveDays / performanceHistory.length) * 100).toFixed(1)}%` : "—"}
-          changeLabel={`${periodPositiveDays}/${performanceHistory.length} days`}
+          changeLabel={`${periodPositiveDays}/${performanceHistory.length} ${frequencyLabel.toLowerCase()} periods`}
         />
       </div>
 
@@ -505,6 +607,7 @@ export default function PerformancePage() {
                     stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
+                    interval={getXAxisTickInterval(returnChart.length, dataFrequency)}
                   />
                   <YAxis 
                     stroke="hsl(var(--muted-foreground))"
@@ -577,6 +680,7 @@ export default function PerformancePage() {
                     stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
+                    interval={getXAxisTickInterval(valueChart.length, dataFrequency)}
                   />
                   <YAxis 
                     stroke="hsl(var(--muted-foreground))"
@@ -625,8 +729,8 @@ export default function PerformancePage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <Card data-testid="card-daily-returns">
           <CardHeader>
-            <CardTitle className="text-base font-medium">Daily Returns</CardTitle>
-            <CardDescription>Last 90 days of daily performance</CardDescription>
+            <CardTitle className="text-base font-medium">{frequencyLabel} Returns</CardTitle>
+            <CardDescription>Last {getRecentPeriodCount(dataFrequency)} {frequencyLabel.toLowerCase()} periods of performance</CardDescription>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={280}>
@@ -637,7 +741,7 @@ export default function PerformancePage() {
                   stroke="hsl(var(--muted-foreground))"
                   fontSize={10}
                   tickLine={false}
-                  interval="preserveStartEnd"
+                  interval={getXAxisTickInterval(dailyReturnChart.length, dataFrequency)}
                 />
                 <YAxis 
                   stroke="hsl(var(--muted-foreground))"
@@ -653,14 +757,17 @@ export default function PerformancePage() {
                     fontSize: 12,
                   }}
                   labelFormatter={(label, payload) => payload[0]?.payload?.fullDate || label}
-                  formatter={(value: number) => [`${value.toFixed(3)}%`, "Daily Return"]}
+                  formatter={(value: number) => [`${value.toFixed(3)}%`, `${frequencyLabel} Return`]}
                 />
-                <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" />
-                <Bar 
-                  dataKey="daily" 
-                  fill="hsl(var(--chart-1))"
-                  radius={[2, 2, 0, 0]}
-                />
+                <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeWidth={1.5} />
+                <Bar dataKey="daily" radius={[1, 1, 0, 0]}>
+                  {dailyReturnChart.map((entry, index) => (
+                    <Cell 
+                      key={`cell-${index}`}
+                      fill={entry.daily >= 0 ? "hsl(152, 76%, 36%)" : "hsl(0, 84%, 60%)"}
+                    />
+                  ))}
+                </Bar>
               </ComposedChart>
             </ResponsiveContainer>
           </CardContent>
@@ -674,13 +781,13 @@ export default function PerformancePage() {
           <CardContent>
             <div className="grid gap-4">
               <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">Best Day</span>
+                <span className="text-sm text-muted-foreground">Best {periodLabel}</span>
                 <span className="font-mono text-sm text-emerald-500">
                   +{formatPercent(periodBestDay)}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 border-b">
-                <span className="text-sm text-muted-foreground">Worst Day</span>
+                <span className="text-sm text-muted-foreground">Worst {periodLabel}</span>
                 <span className="font-mono text-sm text-red-500">
                   {formatPercent(periodWorstDay)}
                 </span>
@@ -698,7 +805,7 @@ export default function PerformancePage() {
                 </span>
               </div>
               <div className="flex items-center justify-between py-3">
-                <span className="text-sm text-muted-foreground">Positive Days</span>
+                <span className="text-sm text-muted-foreground">Positive {periodLabel}s</span>
                 <span className="font-mono text-sm">
                   {periodPositiveDays} / {performanceHistory.length}
                 </span>
@@ -717,8 +824,17 @@ export default function PerformancePage() {
           <CardContent>
             <div className="grid gap-3">
               {selectedBenchmarks.map((sb, index) => {
-                const lastReturn = sb.returns[sb.returns.length - 1];
-                const totalReturn = lastReturn?.cumulativeReturn ? parseFloat(lastReturn.cumulativeReturn) : 0;
+                const filteredReturns = sb.returns
+                  .filter(r => new Date(r.date) >= startDate)
+                  .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+                let totalReturn = 0;
+                if (filteredReturns.length >= 2) {
+                  const firstCum = filteredReturns[0].cumulativeReturn ? parseFloat(filteredReturns[0].cumulativeReturn) : 0;
+                  const lastCum = filteredReturns[filteredReturns.length - 1].cumulativeReturn ? parseFloat(filteredReturns[filteredReturns.length - 1].cumulativeReturn) : 0;
+                  totalReturn = (1 + lastCum) / (1 + firstCum) - 1;
+                } else if (filteredReturns.length === 1) {
+                  totalReturn = filteredReturns[0].cumulativeReturn ? parseFloat(filteredReturns[0].cumulativeReturn) : 0;
+                }
                 return (
                   <div 
                     key={sb.benchmark.id} 
@@ -736,7 +852,7 @@ export default function PerformancePage() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => removeBenchmarkMutation.mutate(sb.benchmark.id)}
+                        onClick={() => handleRemoveBenchmark(sb.benchmark.id)}
                         data-testid={`button-remove-benchmark-card-${sb.benchmark.id}`}
                       >
                         <X className="h-4 w-4" />
