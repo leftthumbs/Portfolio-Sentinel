@@ -1,7 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { usePortfolio } from "@/hooks/use-portfolio";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +16,8 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Briefcase, Plus, Trash2, Play, TrendingUp, BarChart3, Target, ArrowRight, AlertTriangle, Download, Calendar, DollarSign, Library, Search, Check, Sparkles, Zap, Shield, ClipboardCheck, FileText, Loader2, RefreshCw } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Briefcase, Plus, Trash2, Play, TrendingUp, BarChart3, Target, ArrowRight, AlertTriangle, Download, Calendar, DollarSign, Library, Search, Check, Sparkles, Zap, Shield, ClipboardCheck, FileText, Loader2, RefreshCw, Upload, FileSpreadsheet, X } from "lucide-react";
 import { Tooltip as UITooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart, BarChart, Bar, Cell, ReferenceLine } from "recharts";
 import { cn } from "@/lib/utils";
@@ -108,7 +110,7 @@ const strategyTypes = [
   "Hedge Fund",
   "Private Equity",
   "Venture Capital",
-  "Real Estate Fund",
+  "Real Assets Fund",
   "Credit Strategy",
   "Macro Strategy",
   "Long/Short Equity",
@@ -154,10 +156,19 @@ const defaultAssetParams: Record<string, { expectedReturn: string; volatility: s
 
 export default function PortfolioBuilderPage() {
   const { toast } = useToast();
-  const [selectedPortfolioId, setSelectedPortfolioId] = useState<string | null>(null);
+  const { selectedPortfolioId: globalPortfolioId, selectedPortfolioType, setPortfolioSelection } = usePortfolio();
+  const [selectedPortfolioId, setSelectedPortfolioIdLocal] = useState<string | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isBacktestDialogOpen, setIsBacktestDialogOpen] = useState(false);
   const [isLibraryDialogOpen, setIsLibraryDialogOpen] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+  const setSelectedPortfolioId = useCallback((id: string | null) => {
+    setSelectedPortfolioIdLocal(id);
+    if (id) {
+      setPortfolioSelection({ id, type: "custom" });
+    }
+  }, [setPortfolioSelection]);
   const [newPortfolioName, setNewPortfolioName] = useState("");
   const [newPortfolioDescription, setNewPortfolioDescription] = useState("");
   const [strategySearchOpen, setStrategySearchOpen] = useState<number | null>(null);
@@ -171,6 +182,12 @@ export default function PortfolioBuilderPage() {
     riskFreeRate: 0.04, // Default 4%, will be updated with T-bill rate
   });
   const [tickerLookupLoading, setTickerLookupLoading] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState("build");
+  const [isDragging, setIsDragging] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [parsedImportData, setParsedImportData] = useState<Array<{fundName: string; ticker?: string; assetClass: string; marketValue: number; costBasis?: number; allocation?: number;}> | null>(null);
+  const [editableImportData, setEditableImportData] = useState<Array<{fundName: string; ticker?: string; assetClass: string; marketValue: number; costBasis?: number; allocation?: number;}>>([]);
+  const [importPortfolioName, setImportPortfolioName] = useState("");
 
   const { data: strategiesData, isLoading: strategiesLoading } = useQuery<{ strategies: Strategy[] }>({
     queryKey: ["/api/strategies"],
@@ -200,6 +217,16 @@ export default function PortfolioBuilderPage() {
     }
   }, [treasuryRate?.rate]);
 
+  useEffect(() => {
+    if (globalPortfolioId && selectedPortfolioType === "custom" && globalPortfolioId !== selectedPortfolioId) {
+      const customPortfolios = portfoliosData?.portfolios || [];
+      const isCustomPortfolio = customPortfolios.some(p => p.id === globalPortfolioId);
+      if (isCustomPortfolio) {
+        setSelectedPortfolioIdLocal(globalPortfolioId);
+      }
+    }
+  }, [globalPortfolioId, selectedPortfolioType, portfoliosData]);
+
   const createPortfolioMutation = useMutation({
     mutationFn: async (data: { name: string; description?: string; items: PortfolioItem[] }) => {
       return apiRequest("POST", "/api/custom-portfolios", data);
@@ -224,9 +251,11 @@ export default function PortfolioBuilderPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/custom-portfolios"] });
       queryClient.invalidateQueries({ queryKey: ["/api/portfolio-options"] });
       setSelectedPortfolioId(null);
+      setDeleteConfirmId(null);
       toast({ title: "Portfolio deleted", description: "The portfolio has been deleted." });
     },
     onError: (error: any) => {
+      setDeleteConfirmId(null);
       toast({ title: "Error", description: error.message || "Failed to delete portfolio", variant: "destructive" });
     },
   });
@@ -315,22 +344,52 @@ export default function PortfolioBuilderPage() {
     
     setIsAuditDialogOpen(true);
     
-    const itemsWithStrategies = portfolioDetail.items.filter(item => item.strategyId);
-    if (itemsWithStrategies.length === 0) {
+    const allItems = portfolioDetail.items;
+    if (allItems.length === 0) {
       setAuditItems([]);
       return;
     }
 
-    setAuditItems(itemsWithStrategies.map(item => ({
+    setAuditItems(allItems.map(item => ({
       item,
       returns: [],
       loading: true,
       error: null,
     })));
 
-    for (const item of itemsWithStrategies) {
+    // For items without strategyId, try to resolve by matching name/ticker to strategy library
+    let resolvedStrategies: Record<string, string> = {};
+    const itemsNeedingLookup = allItems.filter(item => !item.strategyId);
+    if (itemsNeedingLookup.length > 0) {
       try {
-        const response = await fetch(`/api/strategies/${item.strategyId}/returns`);
+        const strategiesRes = await fetch("/api/strategies", { credentials: "include" });
+        if (strategiesRes.ok) {
+          const strategiesList = await strategiesRes.json();
+          for (const item of itemsNeedingLookup) {
+            const match = strategiesList.find((s: any) => 
+              s.name.toLowerCase() === item.name.toLowerCase() ||
+              (item.ticker && s.ticker && s.ticker.toLowerCase() === item.ticker.toLowerCase())
+            );
+            if (match) {
+              resolvedStrategies[item.id] = match.id;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    for (const item of allItems) {
+      const strategyId = item.strategyId || resolvedStrategies[item.id];
+      if (!strategyId) {
+        setAuditItems(prev => prev.map(a => 
+          a.item.id === item.id 
+            ? { ...a, loading: false, error: "No matching strategy found in library" }
+            : a
+        ));
+        continue;
+      }
+      try {
+        const response = await fetch(`/api/strategies/${strategyId}/returns`, { credentials: "include" });
         const data = await response.json();
         
         setAuditItems(prev => prev.map(a => 
@@ -490,6 +549,20 @@ export default function PortfolioBuilderPage() {
     });
   };
 
+  const mapImportAssetClass = (importClass: string): string => {
+    const mapping: Record<string, string> = {
+      "equity": "US Equity", "equities": "US Equity",
+      "fixed income": "Fixed Income", "bonds": "Fixed Income", "bond": "Fixed Income",
+      "real estate": "Real Estate", "reit": "Real Estate",
+      "alternatives": "Alternatives", "alternative": "Alternatives",
+      "cash": "Cash", "money market": "Cash",
+      "commodities": "Commodities", "commodity": "Commodities",
+      "private equity": "Private Equity",
+      "hedge fund": "Hedge Funds", "hedge funds": "Hedge Funds",
+    };
+    return mapping[importClass.toLowerCase()] || "Other";
+  };
+
   const formatPercent = (value: string | number) => {
     const num = typeof value === "string" ? parseFloat(value) : value;
     return `${(num * 100).toFixed(2)}%`;
@@ -498,6 +571,101 @@ export default function PortfolioBuilderPage() {
   const formatCurrency = (value: string | number) => {
     const num = typeof value === "string" ? parseFloat(value) : value;
     return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(num);
+  };
+
+  const parseMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch("/api/import/parse", {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || "Failed to parse file");
+      }
+      return response.json();
+    },
+    onSuccess: (data: any) => {
+      setParsedImportData(data.investments);
+      setEditableImportData(data.investments);
+      toast({
+        title: "File parsed successfully",
+        description: `Found ${data.summary.totalItems} investments worth ${formatCurrency(data.summary.totalValue)}`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({ variant: "destructive", title: "Parse failed", description: error.message });
+    },
+  });
+
+  const handleImportDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, []);
+  const handleImportDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); }, []);
+  const handleImportDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile) { setImportFile(droppedFile); parseMutation.mutate(droppedFile); }
+  }, [parseMutation]);
+  const handleImportFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (selectedFile) { setImportFile(selectedFile); parseMutation.mutate(selectedFile); }
+  }, [parseMutation]);
+  const updateImportInvestment = (index: number, field: string, value: string | number) => {
+    setEditableImportData(prev => { const updated = [...prev]; updated[index] = { ...updated[index], [field]: value }; return updated; });
+  };
+  const removeImportInvestment = (index: number) => { setEditableImportData(prev => prev.filter((_, i) => i !== index)); };
+  const resetImport = () => { setImportFile(null); setParsedImportData(null); setEditableImportData([]); setImportPortfolioName(""); };
+
+  const importTotalValue = editableImportData.reduce((sum, inv) => sum + inv.marketValue, 0);
+
+  const resolveAssetClass = (importClass: string): string => {
+    const lower = importClass.toLowerCase().trim();
+    const exact = assetClasses.find(ac => ac.toLowerCase() === lower);
+    if (exact) return exact;
+    const mapped = mapImportAssetClass(importClass);
+    if (mapped !== "Other") return mapped;
+    const partial = assetClasses.find(ac => lower.includes(ac.toLowerCase()) || ac.toLowerCase().includes(lower));
+    if (partial) return partial;
+    return "Other";
+  };
+
+  const handleCreateFromImport = () => {
+    if (!importPortfolioName.trim()) {
+      toast({ title: "Name required", description: "Please enter a portfolio name", variant: "destructive" });
+      return;
+    }
+    if (editableImportData.length === 0) {
+      toast({ title: "No investments", description: "Please upload a file with investment data", variant: "destructive" });
+      return;
+    }
+    const totalValue = editableImportData.reduce((sum, inv) => sum + inv.marketValue, 0);
+    const portfolioItems = editableImportData.map(inv => {
+      const weight = totalValue > 0 ? ((inv.marketValue / totalValue) * 100).toFixed(2) : "0";
+      const mappedAssetClass = resolveAssetClass(inv.assetClass);
+      const params = defaultAssetParams[mappedAssetClass] || defaultAssetParams["Other"];
+      return {
+        name: inv.fundName,
+        ticker: inv.ticker || "",
+        strategyType: "Investment" as string,
+        assetClass: mappedAssetClass,
+        weight,
+        expectedReturn: params.expectedReturn,
+        volatility: params.volatility,
+      };
+    });
+    const fileName = importFile?.name || "file";
+    createPortfolioMutation.mutate({
+      name: importPortfolioName,
+      description: `Imported from ${fileName}`,
+      items: portfolioItems,
+    }, {
+      onSuccess: () => {
+        resetImport();
+        setActiveTab("build");
+      },
+    });
   };
 
   if (portfoliosLoading) {
@@ -514,14 +682,15 @@ export default function PortfolioBuilderPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
             <Briefcase className="h-6 w-6 text-primary" />
-            Custom Portfolio Builder
+            Portfolio Builder
           </h1>
-          <p className="text-muted-foreground">Build and backtest pro forma portfolios with custom allocations</p>
+          <p className="text-muted-foreground">Build, import, and backtest custom portfolios</p>
         </div>
+        {activeTab === "build" && (
         <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
           <DialogTrigger asChild>
             <Button data-testid="button-create-portfolio">
@@ -578,7 +747,7 @@ export default function PortfolioBuilderPage() {
                         Optimize
                       </Button>
                     </DialogTrigger>
-                    <DialogContent className="max-w-2xl">
+                    <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
                       <DialogHeader>
                         <DialogTitle className="flex items-center gap-2">
                           <Sparkles className="h-5 w-5 text-primary" />
@@ -588,7 +757,7 @@ export default function PortfolioBuilderPage() {
                           Generate optimal asset allocation based on your selected goal
                         </DialogDescription>
                       </DialogHeader>
-                      <div className="space-y-4 py-4">
+                      <div className="space-y-4 py-4 overflow-y-auto flex-1">
                         <div className="space-y-2">
                           <Label>Optimization Goal</Label>
                           <div className="grid grid-cols-3 gap-3">
@@ -901,8 +1070,22 @@ export default function PortfolioBuilderPage() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+        )}
       </div>
 
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabsList>
+          <TabsTrigger value="build" data-testid="tab-build">
+            <Briefcase className="h-4 w-4 mr-2" />
+            Build
+          </TabsTrigger>
+          <TabsTrigger value="import" data-testid="tab-import">
+            <Upload className="h-4 w-4 mr-2" />
+            Import from File
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="build" className="mt-6">
       <div className="grid grid-cols-12 gap-6">
         <div className="col-span-4">
           <Card>
@@ -930,16 +1113,24 @@ export default function PortfolioBuilderPage() {
                       onClick={() => setSelectedPortfolioId(portfolio.id)}
                       data-testid={`portfolio-card-${portfolio.id}`}
                     >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h4 className="font-medium">{portfolio.name}</h4>
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="min-w-0 flex-1">
+                          <h4 className="font-medium truncate">{portfolio.name}</h4>
                           {portfolio.description && (
                             <p className="text-sm text-muted-foreground truncate max-w-[200px]">
                               {portfolio.description}
                             </p>
                           )}
                         </div>
-                        <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="shrink-0"
+                          onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(portfolio.id); }}
+                          data-testid={`button-delete-portfolio-${portfolio.id}`}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
                       </div>
                     </div>
                   ))}
@@ -1070,7 +1261,7 @@ export default function PortfolioBuilderPage() {
                       <Button
                         variant="destructive"
                         size="icon"
-                        onClick={() => deletePortfolioMutation.mutate(selectedPortfolioId)}
+                        onClick={() => setDeleteConfirmId(selectedPortfolioId)}
                         data-testid="button-delete-portfolio"
                       >
                         <Trash2 className="h-4 w-4" />
@@ -1387,6 +1578,195 @@ export default function PortfolioBuilderPage() {
           ) : null}
         </div>
       </div>
+        </TabsContent>
+
+        <TabsContent value="import" className="mt-6">
+          <div className="space-y-6">
+            {!parsedImportData ? (
+              <Card data-testid="card-import-upload">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Upload className="h-5 w-5" />
+                    Upload File
+                  </CardTitle>
+                  <CardDescription>
+                    Upload a PDF, Excel, or CSV file to automatically extract investments and create a custom portfolio
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div
+                    className={`border-2 border-dashed rounded-lg p-12 text-center transition-colors ${
+                      isDragging ? "border-primary bg-primary/5" : "border-muted-foreground/25 hover:border-primary/50"
+                    }`}
+                    onDragOver={handleImportDragOver}
+                    onDragLeave={handleImportDragLeave}
+                    onDrop={handleImportDrop}
+                    data-testid="dropzone-import"
+                  >
+                    {parseMutation.isPending ? (
+                      <div className="flex flex-col items-center gap-4">
+                        <Loader2 className="h-12 w-12 text-primary animate-spin" />
+                        <p className="text-lg font-medium">Parsing file...</p>
+                        <p className="text-sm text-muted-foreground">Extracting investment data from your file</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex justify-center gap-4 mb-4">
+                          <FileSpreadsheet className="h-12 w-12 text-muted-foreground" />
+                          <FileText className="h-12 w-12 text-muted-foreground" />
+                        </div>
+                        <p className="text-lg font-medium mb-2">Drag and drop your file here</p>
+                        <p className="text-sm text-muted-foreground mb-4">or click to browse</p>
+                        <Input type="file" accept=".pdf,.xlsx,.xls,.csv" className="hidden" id="import-file-upload" onChange={handleImportFileSelect} data-testid="input-import-file" />
+                        <label htmlFor="import-file-upload">
+                          <Button variant="outline" asChild><span data-testid="button-browse-import">Browse Files</span></Button>
+                        </label>
+                      </>
+                    )}
+                  </div>
+                  <div className="mt-6 grid gap-4 md:grid-cols-3">
+                    <div className="flex items-start gap-3 p-4 rounded-lg bg-muted/50">
+                      <FileSpreadsheet className="h-8 w-8 text-green-500 flex-shrink-0" />
+                      <div>
+                        <p className="font-medium text-sm">Excel Files</p>
+                        <p className="text-xs text-muted-foreground">.xlsx, .xls with columns for fund name, value, asset class</p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3 p-4 rounded-lg bg-muted/50">
+                      <FileText className="h-8 w-8 text-red-500 flex-shrink-0" />
+                      <div>
+                        <p className="font-medium text-sm">PDF Statements</p>
+                        <p className="text-xs text-muted-foreground">Brokerage statements, fund reports with holdings</p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3 p-4 rounded-lg bg-muted/50">
+                      <FileSpreadsheet className="h-8 w-8 text-blue-500 flex-shrink-0" />
+                      <div>
+                        <p className="font-medium text-sm">CSV Files</p>
+                        <p className="text-xs text-muted-foreground">Comma-separated values exported from other systems</p>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="space-y-6">
+                <Card>
+                  <CardHeader className="flex flex-row items-center justify-between gap-4">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        <Check className="h-5 w-5 text-green-500" />
+                        File Parsed Successfully
+                      </CardTitle>
+                      <CardDescription>{importFile?.name}</CardDescription>
+                    </div>
+                    <Button variant="outline" onClick={resetImport} data-testid="button-reset-import">Upload Different File</Button>
+                  </CardHeader>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Import Summary</CardTitle>
+                    <CardDescription>Review extracted investments, then create a custom portfolio</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex gap-4 mb-6">
+                      <div className="flex-1 p-4 rounded-lg bg-muted/50 text-center">
+                        <p className="text-2xl font-bold" data-testid="text-import-count">{editableImportData.length}</p>
+                        <p className="text-sm text-muted-foreground">Investments</p>
+                      </div>
+                      <div className="flex-1 p-4 rounded-lg bg-muted/50 text-center">
+                        <p className="text-2xl font-bold text-green-500" data-testid="text-import-value">{formatCurrency(importTotalValue)}</p>
+                        <p className="text-sm text-muted-foreground">Total Value</p>
+                      </div>
+                      <div className="flex-1 p-4 rounded-lg bg-muted/50 text-center">
+                        <p className="text-2xl font-bold" data-testid="text-import-classes">{new Set(editableImportData.map(d => d.assetClass)).size}</p>
+                        <p className="text-sm text-muted-foreground">Asset Classes</p>
+                      </div>
+                    </div>
+                    <div className="space-y-2 mb-6">
+                      <Label htmlFor="import-portfolio-name">Portfolio Name</Label>
+                      <Input id="import-portfolio-name" placeholder="e.g., Imported Q4 Portfolio" value={importPortfolioName} onChange={(e) => setImportPortfolioName(e.target.value)} data-testid="input-import-portfolio-name" />
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="flex flex-row items-center justify-between gap-4">
+                    <div>
+                      <CardTitle>Investment Line Items</CardTitle>
+                      <CardDescription>Edit fund names, asset classes, or remove items before creating portfolio</CardDescription>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="outline" onClick={resetImport} data-testid="button-cancel-import">Cancel</Button>
+                      <Button onClick={handleCreateFromImport} disabled={editableImportData.length === 0 || createPortfolioMutation.isPending} data-testid="button-create-from-import">
+                        {createPortfolioMutation.isPending ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</>) : (<><Plus className="mr-2 h-4 w-4" />Create Portfolio ({editableImportData.length} items)</>)}
+                      </Button>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    {editableImportData.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-12 gap-4">
+                        <AlertTriangle className="h-12 w-12 text-muted-foreground" />
+                        <p className="text-muted-foreground">All investments have been removed</p>
+                        <Button variant="outline" onClick={resetImport}>Start Over</Button>
+                      </div>
+                    ) : (
+                      <div className="rounded-md border">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="w-[300px]">Fund Name</TableHead>
+                              <TableHead>Ticker</TableHead>
+                              <TableHead>Asset Class</TableHead>
+                              <TableHead className="text-right">Market Value</TableHead>
+                              <TableHead className="text-right">Weight</TableHead>
+                              <TableHead className="w-[50px]"></TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {editableImportData.map((inv, index) => (
+                              <TableRow key={index} data-testid={`row-import-${index}`}>
+                                <TableCell>
+                                  <Input value={inv.fundName} onChange={(e) => updateImportInvestment(index, "fundName", e.target.value)} data-testid={`input-import-name-${index}`} />
+                                </TableCell>
+                                <TableCell>
+                                  <Input value={inv.ticker || ""} onChange={(e) => updateImportInvestment(index, "ticker", e.target.value)} className="w-24" placeholder="-" data-testid={`input-import-ticker-${index}`} />
+                                </TableCell>
+                                <TableCell>
+                                  <Select value={inv.assetClass} onValueChange={(value) => updateImportInvestment(index, "assetClass", value)}>
+                                    <SelectTrigger className="w-[160px]" data-testid={`select-import-class-${index}`}><SelectValue /></SelectTrigger>
+                                    <SelectContent>
+                                      {["Equity", "Fixed Income", "Real Estate", "Alternatives", "Cash", "US Equity", "International Equity", "Emerging Markets", "High Yield", "Commodities", "Private Equity", "Hedge Funds", "Other"].map(ac => (
+                                        <SelectItem key={ac} value={ac}>{ac}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </TableCell>
+                                <TableCell className="text-right">
+                                  <Input type="number" value={inv.marketValue} onChange={(e) => updateImportInvestment(index, "marketValue", parseFloat(e.target.value) || 0)} className="w-32 text-right" data-testid={`input-import-value-${index}`} />
+                                </TableCell>
+                                <TableCell className="text-right text-muted-foreground">
+                                  {importTotalValue > 0 ? `${((inv.marketValue / importTotalValue) * 100).toFixed(1)}%` : "-"}
+                                </TableCell>
+                                <TableCell>
+                                  <Button variant="ghost" size="icon" onClick={() => removeImportInvestment(index)} data-testid={`button-remove-import-${index}`}>
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
 
       <Dialog open={isAuditDialogOpen} onOpenChange={setIsAuditDialogOpen}>
         <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
@@ -1405,10 +1785,9 @@ export default function PortfolioBuilderPage() {
               <Card>
                 <CardContent className="flex flex-col items-center justify-center py-8">
                   <FileText className="h-10 w-10 text-muted-foreground mb-3" />
-                  <h3 className="font-medium">No Linked Strategies</h3>
+                  <h3 className="font-medium">No Portfolio Items</h3>
                   <p className="text-muted-foreground text-sm text-center max-w-md mt-2">
-                    None of the portfolio items are linked to strategies from the Strategy Library. 
-                    To audit historical returns, add items from the Strategy Library when building your portfolio.
+                    This portfolio has no items to audit. Add items to your portfolio to view their historical returns.
                   </p>
                 </CardContent>
               </Card>
@@ -1526,6 +1905,30 @@ export default function PortfolioBuilderPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsAuditDialogOpen(false)} data-testid="button-close-audit">
               Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteConfirmId !== null} onOpenChange={(open) => { if (!open) setDeleteConfirmId(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Portfolio</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{portfolios.find(p => p.id === deleteConfirmId)?.name}"? This will permanently remove the portfolio, all its holdings, and any backtest results. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteConfirmId(null)} data-testid="button-cancel-delete">
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => { if (deleteConfirmId) deletePortfolioMutation.mutate(deleteConfirmId); }}
+              disabled={deletePortfolioMutation.isPending}
+              data-testid="button-confirm-delete"
+            >
+              {deletePortfolioMutation.isPending ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Deleting...</> : <><Trash2 className="h-4 w-4 mr-2" />Delete</>}
             </Button>
           </DialogFooter>
         </DialogContent>

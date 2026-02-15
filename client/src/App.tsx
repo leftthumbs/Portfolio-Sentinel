@@ -18,7 +18,6 @@ import PortfolioPage from "@/pages/portfolio";
 import PerformancePage from "@/pages/performance";
 import RiskPage from "@/pages/risk";
 import StressTestsPage from "@/pages/stress-tests";
-import ImportPage from "@/pages/import";
 import PortfolioManagePage from "@/pages/portfolio-manage";
 import DataRoomPage from "@/pages/data-room";
 import InvestmentLibraryPage from "@/pages/gmail";
@@ -28,6 +27,7 @@ import FundAnalysisPage from "@/pages/fund-analysis";
 import AnalyticsGlossaryPage from "@/pages/analytics-glossary";
 import BenchmarksPage from "@/pages/benchmarks";
 import PortfolioComparePage from "@/pages/portfolio-compare";
+import IntervalFundsPage from "@/pages/interval-funds";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,7 +44,6 @@ function Router() {
       <ProtectedRoute path="/performance" component={PerformancePage} />
       <ProtectedRoute path="/risk" component={RiskPage} />
       <ProtectedRoute path="/stress-tests" component={StressTestsPage} />
-      <ProtectedRoute path="/import" component={ImportPage} />
       <ProtectedRoute path="/portfolio/:id/manage" component={PortfolioManagePage} />
       <ProtectedRoute path="/data-room" component={DataRoomPage} />
       <ProtectedRoute path="/gmail" component={InvestmentLibraryPage} />
@@ -54,6 +53,7 @@ function Router() {
       <ProtectedRoute path="/analytics-glossary" component={AnalyticsGlossaryPage} />
       <ProtectedRoute path="/benchmarks" component={BenchmarksPage} />
       <ProtectedRoute path="/portfolio-compare" component={PortfolioComparePage} />
+      <ProtectedRoute path="/interval-funds" component={IntervalFundsPage} />
       <Route component={NotFound} />
     </Switch>
   );

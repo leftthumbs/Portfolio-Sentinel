@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { seedDatabase, ensureDefaultUser, seedBenchmarks, seedAlternativeFunds } from "./seed";
+import { seedDatabase, ensureDefaultUser, seedBenchmarks, seedAlternativeFunds, seedIntervalFunds } from "./seed";
 import { z } from "zod";
 import multer from "multer";
 import fs from "fs";
@@ -13,11 +13,15 @@ import type { MemoTemplateType } from "@shared/schema";
 import { listOneDriveFiles, getOneDriveFileContent, searchOneDriveFiles } from "./onedrive";
 import { listDriveFiles, searchDriveFiles, getDriveFile, downloadDriveFile } from "./gmail";
 import { runBacktest } from "./backtester";
+import { analyzeIntervalFund, compareIntervalFunds, type IntervalFundAnalysisOutput } from "./intervalFundAnalyzer";
+import { validateIntervalFund, generateDataQualityReport } from "./dataValidation";
+import { searchIntervalFundUniverse, reconciledToInsert, type ReconciledFund } from "./intervalFundSources";
 import { optimizePortfolio } from "./optimizer";
 import { setupAuth } from "./auth";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
-import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns } from "./riskCalculations";
+import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns, calculateAdvancedTailMetrics, calculateComponentRisk, calculateFactorDecomposition, runMonteCarloStress, type HoldingInfo } from "./riskCalculations";
+import { refreshBenchmarkReturns, refreshSingleBenchmark, isRealTicker } from "./benchmarkDataService";
 import {
   processReturnsForPeriod,
   processCompositeReturns,
@@ -30,6 +34,16 @@ import {
   type Cadence,
   type ReturnDataPoint,
 } from "./benchmarkCalculations";
+import {
+  ScenarioEngine,
+  holdingsToPortfolioHoldings,
+  HISTORICAL_SCENARIOS,
+  HYPOTHETICAL_SCENARIOS,
+  DEFAULT_FACTORS,
+  type ScenarioDefinition,
+  type ScenarioShock,
+  type PortfolioHolding,
+} from "./scenarioEngine";
 
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
@@ -43,7 +57,7 @@ if (!fs.existsSync(STRATEGY_FILES_DIR)) {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedMimes = [
       "application/pdf",
@@ -75,6 +89,47 @@ const stressTestInputSchema = z.object({
   portfolioType: z.enum(["core", "custom"]).optional(),
 });
 
+const enhancedStressTestSchema = z.object({
+  scenario: z.object({
+    name: z.string().min(1),
+    description: z.string().optional().default(""),
+    category: z.enum(["historical", "hypothetical", "reverse", "monte_carlo"]).default("hypothetical"),
+    regime: z.enum(["expansion", "contraction", "crisis"]).optional(),
+    shocks: z.object({
+      equity: z.number().optional(),
+      rates: z.number().optional(),
+      credit: z.number().optional(),
+      fx: z.number().optional(),
+      commodity: z.number().optional(),
+      volatility: z.number().optional(),
+      inflation: z.number().optional(),
+      liquidity: z.number().optional(),
+    }),
+  }),
+  portfolioId: z.string().optional(),
+  portfolioType: z.enum(["core", "custom"]).optional(),
+  monteCarlo: z.boolean().optional().default(false),
+  numSimulations: z.number().min(100).max(10000).optional().default(1000),
+  fatTails: z.boolean().optional().default(true),
+  degreesOfFreedom: z.number().min(3).max(30).optional().default(5),
+});
+
+const reverseStressTestSchema = z.object({
+  targetLoss: z.number().min(-1).max(0),
+  portfolioId: z.string().optional(),
+  portfolioType: z.enum(["core", "custom"]).optional(),
+  direction: z.object({
+    equity: z.number().optional(),
+    rates: z.number().optional(),
+    credit: z.number().optional(),
+    fx: z.number().optional(),
+    commodity: z.number().optional(),
+    volatility: z.number().optional(),
+    inflation: z.number().optional(),
+    liquidity: z.number().optional(),
+  }).optional(),
+});
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -87,7 +142,39 @@ export async function registerRoutes(
   // Seed default benchmarks
   await seedBenchmarks();
   await seedAlternativeFunds();
+  await seedIntervalFunds();
   
+  function aggregateToMonthly(dailyData: any[]): any[] {
+    if (dailyData.length <= 36) return dailyData;
+    
+    const monthlyBuckets = new Map<string, any[]>();
+    for (const point of dailyData) {
+      const d = new Date(point.date);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!monthlyBuckets.has(key)) monthlyBuckets.set(key, []);
+      monthlyBuckets.get(key)!.push(point);
+    }
+
+    const result: any[] = [];
+    const sortedKeys = [...monthlyBuckets.keys()].sort();
+    for (const key of sortedKeys) {
+      const points = monthlyBuckets.get(key)!;
+      const lastPoint = points[points.length - 1];
+      const firstPoint = points[0];
+      const startVal = parseFloat(firstPoint.portfolioValue);
+      const endVal = parseFloat(lastPoint.portfolioValue);
+      const monthlyReturn = startVal > 0 ? (endVal - startVal) / startVal : 0;
+      
+      result.push({
+        ...lastPoint,
+        id: `perf-month-${key}`,
+        date: `${key}-01`,
+        dailyReturn: String(monthlyReturn),
+      });
+    }
+    return result;
+  }
+
   let defaultPortfolioId: string | null = null;
 
   async function getDefaultPortfolioId(): Promise<string> {
@@ -350,10 +437,10 @@ export async function registerRoutes(
           calculatedAt: latestBacktest.runDate
         } : null;
 
-        // Generate performance history from backtest data
+        // Generate performance history from backtest data, aggregated to monthly
         let performanceHistory: any[] = [];
         if (latestBacktest?.performanceData && Array.isArray(latestBacktest.performanceData)) {
-          performanceHistory = (latestBacktest.performanceData as any[]).map((p: any, idx: number) => ({
+          const rawData = (latestBacktest.performanceData as any[]).map((p: any, idx: number) => ({
             id: `perf-${idx}`,
             portfolioId: customPortfolio.id,
             date: p.date || new Date(Date.now() - (latestBacktest.performanceData as any[]).length * 24*60*60*1000 + idx * 24*60*60*1000),
@@ -363,6 +450,7 @@ export async function registerRoutes(
             benchmark: null,
             benchmarkReturn: null
           }));
+          performanceHistory = aggregateToMonthly(rawData);
         }
 
         res.json({
@@ -373,14 +461,17 @@ export async function registerRoutes(
           isCustomPortfolio: true
         });
       } else {
-        // Handle core portfolio dashboard
+        // Handle core portfolio dashboard - dynamically calculate all metrics
         const defaultId = await getDefaultPortfolioId();
         const pid = portfolioId || defaultId;
+        const benchmarkId = req.query.benchmarkId as string;
+
+        const rateData = await get3MonthTBillRate();
+        const riskFreeRate = rateData.rate;
         
-        const [portfolio, holdings, riskMetrics, performanceHistory] = await Promise.all([
+        const [portfolio, holdings, performanceHistory] = await Promise.all([
           storage.getPortfolio(pid),
           storage.getHoldings(pid),
-          storage.getRiskMetrics(pid),
           storage.getPerformanceHistory(pid),
         ]);
 
@@ -388,13 +479,92 @@ export async function registerRoutes(
           return res.status(404).json({ message: "Portfolio not found" });
         }
 
+        const sortedHistory = performanceHistory.sort((a, b) => 
+          new Date(a.date).getTime() - new Date(b.date).getTime()
+        );
+
+        const dailyReturns = sortedHistory.map(p => parseFloat(p.dailyReturn || "0"));
+
+        // Dynamically calculate risk metrics from daily returns
+        let riskMetrics: any = null;
+        if (dailyReturns.length >= 10) {
+          const avgReturn = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
+          const tradingDays = dailyReturns.length;
+          const years = tradingDays / 252;
+
+          const firstEntry = sortedHistory[0];
+          const lastEntry = sortedHistory[sortedHistory.length - 1];
+          const startValue = parseFloat(firstEntry.portfolioValue);
+          const endValue = parseFloat(lastEntry.portfolioValue);
+          const totalReturn = startValue > 0 ? (endValue - startValue) / startValue : 0;
+          const annualizedReturn = years > 0 ? Math.pow(1 + totalReturn, 1 / years) - 1 : 0;
+
+          const variance = dailyReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / (dailyReturns.length - 1);
+          const dailyVol = Math.sqrt(variance);
+          const annualVolatility = dailyVol * Math.sqrt(252);
+
+          const sharpeRatio = annualVolatility > 0 ? (annualizedReturn - riskFreeRate) / annualVolatility : 0;
+
+          let peakValue = startValue;
+          let maxDrawdown = 0;
+          for (const p of sortedHistory) {
+            const val = parseFloat(p.portfolioValue);
+            if (val > peakValue) peakValue = val;
+            const dd = (peakValue - val) / peakValue;
+            if (dd > maxDrawdown) maxDrawdown = dd;
+          }
+
+          const sortedReturns = [...dailyReturns].sort((a, b) => a - b);
+          const var95Pct = sortedReturns[Math.floor(dailyReturns.length * 0.05)];
+
+          riskMetrics = {
+            id: `calc-${pid}`,
+            portfolioId: pid,
+            var95: var95Pct != null ? String(var95Pct) : null,
+            volatility: annualVolatility.toFixed(4),
+            sharpeRatio: sharpeRatio.toFixed(4),
+            maxDrawdown: (-maxDrawdown).toFixed(4),
+            calculatedAt: new Date()
+          };
+        }
+
+        // Overlay benchmark returns on performance history using date alignment
+        let benchReturnsData: any[] = [];
+        if (benchmarkId) {
+          benchReturnsData = await storage.getBenchmarkReturns(benchmarkId);
+        }
+        if (benchReturnsData.length === 0) {
+          const benchmarks = await storage.getBenchmarks();
+          const spyBenchmark = benchmarks.find(b => b.ticker === "SPY") || benchmarks[0];
+          if (spyBenchmark) {
+            benchReturnsData = await storage.getBenchmarkReturns(spyBenchmark.id);
+          }
+        }
+
+        // Build date-keyed map for benchmark returns
+        const benchReturnsByDate = new Map<string, number>();
+        for (const br of benchReturnsData) {
+          const dateKey = new Date(br.date).toISOString().split("T")[0];
+          benchReturnsByDate.set(dateKey, parseFloat(br.returnValue || "0"));
+        }
+
+        const startPortfolioValue = sortedHistory.length > 0 ? parseFloat(sortedHistory[0].portfolioValue) : 1000000;
+        let benchmarkCumulativeValue = startPortfolioValue;
+        const historyWithBenchmark = sortedHistory.map((p) => {
+          const dateKey = new Date(p.date).toISOString().split("T")[0];
+          const benchDailyReturn = benchReturnsByDate.get(dateKey) || 0;
+          benchmarkCumulativeValue *= (1 + benchDailyReturn);
+          return {
+            ...p,
+            benchmarkValue: String(benchmarkCumulativeValue),
+          };
+        });
+
         res.json({
           portfolio,
           holdings,
           riskMetrics,
-          performanceHistory: performanceHistory.sort((a, b) => 
-            new Date(a.date).getTime() - new Date(b.date).getTime()
-          ),
+          performanceHistory: historyWithBenchmark,
           isCustomPortfolio: false
         });
       }
@@ -507,7 +677,7 @@ export async function registerRoutes(
 
         let performanceHistory: any[] = [];
         if (latestBacktest?.performanceData && Array.isArray(latestBacktest.performanceData)) {
-          performanceHistory = (latestBacktest.performanceData as any[]).map((p: any, idx: number) => ({
+          const rawData = (latestBacktest.performanceData as any[]).map((p: any, idx: number) => ({
             id: `perf-${idx}`,
             portfolioId: customPortfolio.id,
             date: p.date || new Date(Date.now() - (latestBacktest.performanceData as any[]).length * 24*60*60*1000 + idx * 24*60*60*1000),
@@ -517,6 +687,8 @@ export async function registerRoutes(
             benchmark: null,
             benchmarkReturn: null
           }));
+
+          performanceHistory = aggregateToMonthly(rawData);
         }
 
         const totalReturn = latestBacktest?.totalReturn ? parseFloat(latestBacktest.totalReturn) : 0;
@@ -539,10 +711,11 @@ export async function registerRoutes(
           isCustomPortfolio: true
         });
       } else {
-        // Handle core portfolio performance
+        // Handle core portfolio performance - dynamically calculate from selected benchmark
         const pid = portfolioId || await getDefaultPortfolioId();
         const timePeriod = req.query.timePeriod as BenchmarkTimePeriod | undefined;
         const cadence = req.query.cadence as Cadence | undefined;
+        const benchmarkId = req.query.benchmarkId as string;
 
         const [portfolio, performanceHistory, portfolioBenchmarksList, allBenchmarks] = await Promise.all([
           storage.getPortfolio(pid),
@@ -565,15 +738,65 @@ export async function registerRoutes(
 
         const positivedays = dailyReturns.filter(r => r > 0).length;
         const totalDays = dailyReturns.length;
-        const bestDay = Math.max(...dailyReturns);
-        const worstDay = Math.min(...dailyReturns);
+        const bestDay = dailyReturns.length > 0 ? Math.max(...dailyReturns) : 0;
+        const worstDay = dailyReturns.length > 0 ? Math.min(...dailyReturns) : 0;
 
+        const firstEntry = sortedHistory[0];
         const lastEntry = sortedHistory[sortedHistory.length - 1];
-        const totalReturn = lastEntry?.cumulativeReturn ? parseFloat(lastEntry.cumulativeReturn) : 0;
-        const benchmarkReturn = lastEntry?.benchmarkReturn ? parseFloat(lastEntry.benchmarkReturn) : 0;
+        const startValue = firstEntry ? parseFloat(firstEntry.portfolioValue) : 0;
+        const endValue = lastEntry ? parseFloat(lastEntry.portfolioValue) : 0;
+        const totalReturn = startValue > 0 ? (endValue - startValue) / startValue : 0;
 
-        const annualizedReturn = Math.pow(1 + totalReturn, 365 / totalDays) - 1;
-        const alpha = totalReturn - benchmarkReturn;
+        const startDateMs = firstEntry ? new Date(firstEntry.date).getTime() : 0;
+        const endDateMs = lastEntry ? new Date(lastEntry.date).getTime() : 0;
+        const yearsElapsed = (endDateMs - startDateMs) / (365.25 * 24 * 60 * 60 * 1000);
+        const annualizedReturn = yearsElapsed > 0 ? Math.pow(1 + totalReturn, 1 / yearsElapsed) - 1 : 0;
+
+        let benchmarkReturn = 0;
+        let benchReturnsData: any[] = [];
+        if (benchmarkId) {
+          benchReturnsData = await storage.getBenchmarkReturns(benchmarkId);
+        }
+        if (benchReturnsData.length === 0) {
+          const spyBenchmark = allBenchmarks.find(b => b.ticker === "SPY") || allBenchmarks[0];
+          if (spyBenchmark) {
+            benchReturnsData = await storage.getBenchmarkReturns(spyBenchmark.id);
+          }
+        }
+        if (benchReturnsData.length > 0) {
+          const sortedBench = benchReturnsData
+            .map(br => ({ date: new Date(br.date).getTime(), cumReturn: parseFloat(br.cumulativeReturn || "0") }))
+            .sort((a, b) => a.date - b.date);
+
+          const portfolioStart = startDateMs;
+          const portfolioEnd = endDateMs;
+
+          const benchInRange = sortedBench.filter(b => b.date >= portfolioStart - 7 * 24*60*60*1000 && b.date <= portfolioEnd + 7 * 24*60*60*1000);
+          if (benchInRange.length >= 2) {
+            const firstBench = benchInRange[0];
+            const lastBench = benchInRange[benchInRange.length - 1];
+            benchmarkReturn = (1 + lastBench.cumReturn) / (1 + firstBench.cumReturn) - 1;
+          }
+        }
+
+        let alpha = totalReturn - benchmarkReturn;
+        if (benchReturnsData.length > 0 && benchmarkReturn !== 0) {
+          const sortedBenchForOverlap = benchReturnsData
+            .map(br => ({ date: new Date(br.date).getTime() }))
+            .sort((a, b) => a.date - b.date);
+          const benchWindowStart = sortedBenchForOverlap[0].date;
+          const benchWindowEnd = sortedBenchForOverlap[sortedBenchForOverlap.length - 1].date;
+          const overlapHistory = sortedHistory.filter(p => {
+            const t = new Date(p.date).getTime();
+            return t >= benchWindowStart - 7 * 24*60*60*1000 && t <= benchWindowEnd + 7 * 24*60*60*1000;
+          });
+          if (overlapHistory.length >= 2) {
+            const oStartVal = parseFloat(overlapHistory[0].portfolioValue);
+            const oEndVal = parseFloat(overlapHistory[overlapHistory.length - 1].portfolioValue);
+            const portfolioOverlapReturn = oStartVal > 0 ? (oEndVal - oStartVal) / oStartVal : 0;
+            alpha = portfolioOverlapReturn - benchmarkReturn;
+          }
+        }
 
         // Get benchmark return data for selected benchmarks
         // Download full time series and process based on time period and cadence
@@ -748,19 +971,45 @@ export async function registerRoutes(
             }
           }
           
-          // Get benchmark returns for comparison metrics (use S&P 500 as default)
+          // Get benchmark returns for comparison metrics - use selected benchmark or default to SPY
           const benchmarks = await storage.getBenchmarks();
-          const spyBenchmark = benchmarks.find(b => b.ticker === "SPY") || benchmarks[0];
+          const selectedBenchmarkId = req.query.benchmarkId as string;
+          let benchReturnsRaw: any[] = [];
+          
+          if (selectedBenchmarkId) {
+            benchReturnsRaw = await storage.getBenchmarkReturns(selectedBenchmarkId);
+          }
+          if (benchReturnsRaw.length === 0) {
+            const spyBenchmark = benchmarks.find(b => b.ticker === "SPY") || benchmarks[0];
+            if (spyBenchmark) {
+              benchReturnsRaw = await storage.getBenchmarkReturns(spyBenchmark.id);
+            }
+          }
+
           let benchmarkReturns: number[] = [];
           let annualizedBenchmarkReturn = 0.10;
 
-          if (spyBenchmark) {
-            const benchReturnsData = await storage.getBenchmarkReturns(spyBenchmark.id);
-            if (benchReturnsData.length > 0) {
-              benchmarkReturns = benchReturnsData.map(r => parseFloat(r.returnValue || "0"));
-              const totalBenchReturn = benchReturnsData.reduce((sum, r) => sum + parseFloat(r.returnValue || "0"), 0);
-              annualizedBenchmarkReturn = totalBenchReturn * (252 / benchReturnsData.length);
+          if (benchReturnsRaw.length > 0) {
+            const benchReturnsByDate = new Map<string, number>();
+            for (const br of benchReturnsRaw) {
+              const dateKey = new Date(br.date).toISOString().split("T")[0];
+              benchReturnsByDate.set(dateKey, parseFloat(br.returnValue || "0"));
             }
+            // Use perfData dates for alignment (or backtestData dates as fallback)
+            let alignmentDates: string[] = [];
+            if (perfData && perfData.length > 0) {
+              alignmentDates = perfData.map(p => new Date(p.date).toISOString().split("T")[0]);
+            } else if (latestBacktest?.backtestData) {
+              alignmentDates = (JSON.parse(latestBacktest.backtestData) as any[])
+                .map(d => new Date(d.date || d.Date).toISOString().split("T")[0]);
+            }
+            if (alignmentDates.length > 0) {
+              benchmarkReturns = alignmentDates.map(dateKey => benchReturnsByDate.get(dateKey) || 0);
+            } else {
+              benchmarkReturns = benchReturnsRaw.map(r => parseFloat(r.returnValue || "0"));
+            }
+            const totalBenchReturn = benchmarkReturns.reduce((sum, r) => sum + r, 0);
+            annualizedBenchmarkReturn = benchmarkReturns.length > 0 ? totalBenchReturn * (252 / benchmarkReturns.length) : 0.10;
           }
 
           // If no benchmark returns available, generate synthetic S&P 500-like returns
@@ -896,30 +1145,314 @@ export async function registerRoutes(
           isCustomPortfolio: true
         });
       } else {
-        // Handle core portfolio risk
+        // Handle core portfolio risk - dynamically calculate all metrics
         const pid = portfolioId || await getDefaultPortfolioId();
+        const benchmarkId = req.query.benchmarkId as string;
         
-        const [portfolio, riskMetrics, performanceHistory] = await Promise.all([
+        const [portfolio, performanceHistory, holdings] = await Promise.all([
           storage.getPortfolio(pid),
-          storage.getRiskMetrics(pid),
           storage.getPerformanceHistory(pid),
+          storage.getHoldings(pid),
         ]);
 
         if (!portfolio) {
           return res.status(404).json({ message: "Portfolio not found" });
         }
 
+        const sortedHistory = performanceHistory.sort((a, b) => 
+          new Date(a.date).getTime() - new Date(b.date).getTime()
+        );
+
+        const dailyReturns = sortedHistory.map(p => parseFloat(p.dailyReturn || "0"));
+
+        let riskMetrics: any = null;
+        if (dailyReturns.length >= 10) {
+          const negativeReturns = dailyReturns.filter(r => r < 0);
+          const avgReturn = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
+          const tradingDays = dailyReturns.length;
+          const years = tradingDays / 252;
+
+          const firstEntry = sortedHistory[0];
+          const lastEntry = sortedHistory[sortedHistory.length - 1];
+          const startValue = parseFloat(firstEntry.portfolioValue);
+          const endValue = parseFloat(lastEntry.portfolioValue);
+          const totalReturn = startValue > 0 ? (endValue - startValue) / startValue : 0;
+          const annualizedReturn = years > 0 ? Math.pow(1 + totalReturn, 1 / years) - 1 : 0;
+
+          const variance = dailyReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / (dailyReturns.length - 1);
+          const dailyVol = Math.sqrt(variance);
+          const annualVolatility = dailyVol * Math.sqrt(252);
+
+          const sharpeRatio = annualVolatility > 0 ? (annualizedReturn - riskFreeRate) / annualVolatility : 0;
+
+          const downsideVariance = negativeReturns.length > 0
+            ? negativeReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) / negativeReturns.length
+            : 0;
+          const downsideDeviation = Math.sqrt(downsideVariance) * Math.sqrt(252);
+          const sortinoRatio = downsideDeviation > 0 ? (annualizedReturn - riskFreeRate) / downsideDeviation : null;
+
+          let peakValue = startValue;
+          let maxDrawdown = 0;
+          for (const p of sortedHistory) {
+            const val = parseFloat(p.portfolioValue);
+            if (val > peakValue) peakValue = val;
+            const dd = (peakValue - val) / peakValue;
+            if (dd > maxDrawdown) maxDrawdown = dd;
+          }
+
+          const calmarRatio = maxDrawdown > 0 ? annualizedReturn / maxDrawdown : null;
+
+          let skewness = null;
+          let kurtosis = null;
+          if (dailyReturns.length > 3) {
+            const n = dailyReturns.length;
+            const stdDev = Math.sqrt(dailyReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / n);
+            if (stdDev > 0) {
+              skewness = dailyReturns.reduce((sum, r) => sum + Math.pow((r - avgReturn) / stdDev, 3), 0) / n;
+              kurtosis = dailyReturns.reduce((sum, r) => sum + Math.pow((r - avgReturn) / stdDev, 4), 0) / n - 3;
+            }
+          }
+
+          const gains = dailyReturns.filter(r => r > 0).reduce((a, b) => a + b, 0);
+          const pains = Math.abs(dailyReturns.filter(r => r < 0).reduce((a, b) => a + b, 0));
+          const gainToPainRatio = pains > 0 ? gains / pains : null;
+
+          const gainsAboveThreshold = dailyReturns.filter(r => r > 0).reduce((a, b) => a + b, 0);
+          const lossesBelowThreshold = Math.abs(dailyReturns.filter(r => r < 0).reduce((a, b) => a + b, 0));
+          const omegaRatio = lossesBelowThreshold > 0 ? gainsAboveThreshold / lossesBelowThreshold : null;
+
+          const sortedReturns = [...dailyReturns].sort((a, b) => a - b);
+          const var95Pct = sortedReturns[Math.floor(dailyReturns.length * 0.05)];
+          const var99Pct = sortedReturns[Math.floor(dailyReturns.length * 0.01)];
+          const var95 = var95Pct != null ? String(var95Pct) : null;
+          const var99 = var99Pct != null ? String(var99Pct) : null;
+
+          const tailReturns95 = sortedReturns.filter(r => r <= (var95Pct || 0));
+          const cvar95 = tailReturns95.length > 0
+            ? String(tailReturns95.reduce((sum, r) => sum + r, 0) / tailReturns95.length)
+            : null;
+          const tailReturns99 = sortedReturns.filter(r => r <= (var99Pct || 0));
+          const cvar99 = tailReturns99.length > 0
+            ? String(tailReturns99.reduce((sum, r) => sum + r, 0) / tailReturns99.length)
+            : null;
+
+          let ulcerIndex = null;
+          let painIndex = null;
+          {
+            let runningMax = 0;
+            const drawdowns: number[] = [];
+            for (const p of sortedHistory) {
+              const value = parseFloat(p.portfolioValue);
+              if (value > runningMax) runningMax = value;
+              if (runningMax > 0) drawdowns.push((runningMax - value) / runningMax);
+            }
+            if (drawdowns.length > 0) {
+              ulcerIndex = Math.sqrt(drawdowns.reduce((sum, d) => sum + d * d, 0) / drawdowns.length);
+              painIndex = drawdowns.reduce((sum, d) => sum + d, 0) / drawdowns.length;
+            }
+          }
+
+          const sterlingRatio = painIndex && painIndex > 0.001 ? annualizedReturn / painIndex : null;
+
+          const herfindahlIndex = holdings.reduce((sum, h) => {
+            const weight = parseFloat(h.allocation) / 100;
+            return sum + weight * weight;
+          }, 0);
+
+          let diversificationRatio = null;
+          if (holdings.length > 1 && herfindahlIndex > 0) {
+            diversificationRatio = (1 / herfindahlIndex) / holdings.length;
+          }
+
+          let benchmarkReturns: number[] = [];
+          let annualizedBenchmarkReturn = 0.10;
+
+          // Get benchmark returns and date-align with portfolio returns
+          let benchReturnsRaw: any[] = [];
+          if (benchmarkId) {
+            benchReturnsRaw = await storage.getBenchmarkReturns(benchmarkId);
+          }
+          if (benchReturnsRaw.length === 0) {
+            const benchmarks = await storage.getBenchmarks();
+            const spyBenchmark = benchmarks.find(b => b.ticker === "SPY") || benchmarks[0];
+            if (spyBenchmark) {
+              benchReturnsRaw = await storage.getBenchmarkReturns(spyBenchmark.id);
+            }
+          }
+
+          if (benchReturnsRaw.length > 0) {
+            const benchReturnsByDate = new Map<string, number>();
+            for (const br of benchReturnsRaw) {
+              const dateKey = new Date(br.date).toISOString().split("T")[0];
+              benchReturnsByDate.set(dateKey, parseFloat(br.returnValue || "0"));
+            }
+            benchmarkReturns = sortedHistory.map(p => {
+              const dateKey = new Date(p.date).toISOString().split("T")[0];
+              return benchReturnsByDate.get(dateKey) || 0;
+            });
+            const totalBenchReturn = benchmarkReturns.reduce((sum, r) => sum + r, 0);
+            annualizedBenchmarkReturn = totalBenchReturn * (252 / benchmarkReturns.length);
+          }
+
+          if (benchmarkReturns.length < 10) {
+            benchmarkReturns = generateSyntheticBenchmarkReturns(dailyReturns.length, 0.10, 0.16);
+            annualizedBenchmarkReturn = 0.10;
+          }
+
+          const benchmarkMetrics = calculateBenchmarkMetrics({
+            portfolioReturns: dailyReturns,
+            benchmarkReturns,
+            riskFreeRate,
+            annualizedPortfolioReturn: annualizedReturn,
+            annualizedBenchmarkReturn,
+          });
+
+          riskMetrics = {
+            id: `calc-${pid}`,
+            portfolioId: pid,
+            var95,
+            var99,
+            cvar95,
+            cvar99,
+            volatility: annualVolatility.toFixed(4),
+            sharpeRatio: sharpeRatio.toFixed(4),
+            sortinoRatio: sortinoRatio?.toFixed(4) || null,
+            calmarRatio: calmarRatio?.toFixed(4) || null,
+            maxDrawdown: (-maxDrawdown).toFixed(4),
+            beta: benchmarkMetrics.beta?.toFixed(4) || null,
+            alpha: benchmarkMetrics.alpha?.toFixed(4) || null,
+            correlation: benchmarkMetrics.correlation?.toFixed(4) || null,
+            downsideCorrelation: benchmarkMetrics.downsideCorrelation?.toFixed(4) || null,
+            trackingError: benchmarkMetrics.trackingError?.toFixed(4) || null,
+            informationRatio: benchmarkMetrics.informationRatio?.toFixed(4) || null,
+            omegaRatio: omegaRatio?.toFixed(4) || null,
+            sterlingRatio: sterlingRatio?.toFixed(4) || null,
+            burkeRatio: null,
+            upsideCapture: benchmarkMetrics.upsideCapture?.toFixed(4) || null,
+            downsideCapture: benchmarkMetrics.downsideCapture?.toFixed(4) || null,
+            ulcerIndex: ulcerIndex?.toFixed(4) || null,
+            painIndex: painIndex?.toFixed(4) || null,
+            gainToPainRatio: gainToPainRatio?.toFixed(4) || null,
+            marRatio: calmarRatio?.toFixed(4) || null,
+            skewness: skewness?.toFixed(4) || null,
+            kurtosis: kurtosis?.toFixed(4) || null,
+            tailRatio: benchmarkMetrics.tailRatio?.toFixed(4) || null,
+            herfindahlIndex: herfindahlIndex?.toFixed(4) || null,
+            diversificationRatio: diversificationRatio?.toFixed(4) || null,
+            treynorRatio: benchmarkMetrics.treynorRatio?.toFixed(4) || null,
+            jensensAlpha: benchmarkMetrics.alpha?.toFixed(4) || null,
+            calculatedAt: new Date()
+          };
+        }
+
         res.json({
           portfolio,
           riskMetrics,
-          performanceHistory: performanceHistory.sort((a, b) => 
-            new Date(a.date).getTime() - new Date(b.date).getTime()
-          ),
+          performanceHistory: sortedHistory,
           isCustomPortfolio: false
         });
       }
     } catch (error) {
       console.error("Risk error:", error);
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  app.get("/api/risk/advanced", async (req, res) => {
+    try {
+      const portfolioType = (req.query.portfolioType as string) || "core";
+      const portfolioId = req.query.portfolioId as string;
+      const benchmarkId = req.query.benchmarkId as string;
+
+      let riskFreeRate = 0.05;
+      try {
+        const tbillRate = await get3MonthTBillRate();
+        riskFreeRate = tbillRate;
+      } catch (e) {}
+
+      let dailyReturns: number[] = [];
+      let portfolioValues: number[] = [];
+      let holdingInfos: HoldingInfo[] = [];
+      let benchmarkReturns: number[] = [];
+
+      if (portfolioType === "custom" && portfolioId) {
+        const customPortfolio = await storage.getCustomPortfolio(portfolioId);
+        if (!customPortfolio) {
+          return res.status(404).json({ message: "Custom portfolio not found" });
+        }
+        const backtests = await storage.getBacktestResults(portfolioId);
+        const latestBacktest = backtests.length > 0 ? backtests[0] : null;
+        if (latestBacktest?.equityCurve) {
+          const curve = Array.isArray(latestBacktest.equityCurve)
+            ? latestBacktest.equityCurve as number[]
+            : [];
+          portfolioValues = curve;
+          for (let i = 1; i < curve.length; i++) {
+            if (curve[i - 1] > 0) {
+              dailyReturns.push((curve[i] - curve[i - 1]) / curve[i - 1]);
+            }
+          }
+        }
+
+        const items = await storage.getCustomPortfolioItems(portfolioId);
+        holdingInfos = items.map(item => ({
+          name: item.name,
+          assetClass: item.assetClass || "Alternative",
+          weight: parseFloat(item.weight) / 100,
+          returns: [],
+        }));
+      } else {
+        const pid = portfolioId || await getDefaultPortfolioId();
+        const performanceHistory = await storage.getPerformanceHistory(pid);
+
+        if (performanceHistory.length > 0) {
+          const sorted = performanceHistory.sort((a, b) =>
+            new Date(a.date).getTime() - new Date(b.date).getTime()
+          );
+          dailyReturns = sorted.map(p => parseFloat(p.dailyReturn || "0"));
+          portfolioValues = sorted.map(p => parseFloat(p.portfolioValue));
+        }
+
+        const holdings = await storage.getHoldings(pid || "");
+        holdingInfos = holdings.map(h => ({
+          name: h.name,
+          assetClass: h.assetClass || "Alternative",
+          weight: parseFloat(h.allocation) / 100,
+          returns: [],
+        }));
+      }
+
+      if (benchmarkId) {
+        const benchReturnsRaw = await storage.getBenchmarkReturns(benchmarkId);
+        benchmarkReturns = benchReturnsRaw.map(br => parseFloat(br.returnValue || "0"));
+      }
+      if (benchmarkReturns.length < 10) {
+        benchmarkReturns = generateSyntheticBenchmarkReturns(dailyReturns.length, 0.10, 0.16);
+      }
+
+      const advancedTail = calculateAdvancedTailMetrics(dailyReturns, portfolioValues, riskFreeRate);
+      const componentRisk = calculateComponentRisk(holdingInfos, dailyReturns);
+      const factorDecomp = calculateFactorDecomposition(dailyReturns, benchmarkReturns);
+
+      const stressScenarios = [
+        { name: "Baseline (No Stress)", meanShift: 0, volMultiplier: 1.0 },
+        { name: "Mild Stress (Vol +50%)", meanShift: -0.03, volMultiplier: 1.5 },
+        { name: "Moderate Stress (Vol 2x)", meanShift: -0.08, volMultiplier: 2.0 },
+        { name: "Severe Stress (Vol 3x)", meanShift: -0.15, volMultiplier: 3.0 },
+      ];
+
+      const monteCarloResults = dailyReturns.length >= 20
+        ? stressScenarios.map(scenario => runMonteCarloStress(dailyReturns, scenario, 200, 252))
+        : [];
+
+      res.json({
+        advancedTail,
+        componentRisk,
+        factorDecomposition: factorDecomp,
+        monteCarloStress: monteCarloResults,
+      });
+    } catch (error) {
+      console.error("Advanced risk error:", error);
       res.status(500).json({ message: "Internal server error" });
     }
   });
@@ -1079,7 +1612,7 @@ export async function registerRoutes(
       const totalImpact = equityImpact + rateImpact + creditImpact + fxImpact;
       const impactAmount = portfolioValue * totalImpact;
 
-      const stressTest = await storage.createStressTest({
+      const stressTestData = {
         portfolioId,
         scenarioName: name,
         scenarioType: "Custom",
@@ -1090,11 +1623,340 @@ export async function registerRoutes(
         fxShock: fxShock.toString(),
         portfolioImpact: totalImpact.toFixed(6),
         impactAmount: impactAmount.toFixed(2),
-      });
+      };
 
-      res.status(201).json(stressTest);
+      if (portfolioType === "custom") {
+        const inMemoryResult = {
+          id: `custom-stress-${Date.now()}`,
+          ...stressTestData,
+          runDate: new Date(),
+        };
+        res.status(201).json(inMemoryResult);
+      } else {
+        const stressTest = await storage.createStressTest(stressTestData);
+        res.status(201).json(stressTest);
+      }
     } catch (error) {
       console.error("Create stress test error:", error);
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  async function resolvePortfolioForScenario(
+    reqPortfolioId?: string,
+    portfolioType?: string
+  ): Promise<{ holdings: PortfolioHolding[]; portfolioValue: number; portfolioId: string }> {
+    if (portfolioType === "custom" && reqPortfolioId) {
+      const customPortfolio = await storage.getCustomPortfolio(reqPortfolioId);
+      if (!customPortfolio) throw new Error("Custom portfolio not found");
+
+      const items = await storage.getCustomPortfolioItems(reqPortfolioId);
+      const backtests = await storage.getBacktestResults(reqPortfolioId);
+      const latestBacktest = backtests.length > 0 ? backtests[0] : null;
+      const portfolioValue = latestBacktest?.finalValue ? parseFloat(latestBacktest.finalValue) : 1000000;
+
+      return {
+        holdings: holdingsToPortfolioHoldings(items),
+        portfolioValue,
+        portfolioId: reqPortfolioId,
+      };
+    } else {
+      const portfolioId = reqPortfolioId || await getDefaultPortfolioId();
+      const portfolio = await storage.getPortfolio(portfolioId);
+      if (!portfolio) throw new Error("Portfolio not found");
+
+      const dbHoldings = await storage.getHoldings(portfolioId);
+      return {
+        holdings: holdingsToPortfolioHoldings(dbHoldings),
+        portfolioValue: parseFloat(portfolio.totalValue),
+        portfolioId,
+      };
+    }
+  }
+
+  app.get("/api/scenario-engine/config", (_req, res) => {
+    res.json({
+      factors: DEFAULT_FACTORS,
+      historicalScenarios: HISTORICAL_SCENARIOS,
+      hypotheticalScenarios: HYPOTHETICAL_SCENARIOS,
+    });
+  });
+
+  app.post("/api/scenario-engine/stress-test", async (req, res) => {
+    try {
+      const validation = enhancedStressTestSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Invalid input",
+          errors: validation.error.flatten().fieldErrors,
+        });
+      }
+
+      const { scenario, portfolioId: reqPortfolioId, portfolioType, monteCarlo, numSimulations, fatTails, degreesOfFreedom } = validation.data;
+
+      const { holdings, portfolioValue, portfolioId } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const scenarioDef: ScenarioDefinition = {
+        name: scenario.name,
+        description: scenario.description || "",
+        category: scenario.category,
+        regime: scenario.regime,
+        shocks: scenario.shocks,
+      };
+
+      let result;
+      if (monteCarlo) {
+        result = engine.runMonteCarloScenario(holdings, scenarioDef, portfolioValue, {
+          numSimulations,
+          fatTails,
+          degreesOfFreedom,
+        });
+      } else {
+        result = engine.runScenario(holdings, scenarioDef, portfolioValue);
+      }
+
+      const stressTest = await storage.createStressTest({
+        portfolioId,
+        scenarioName: scenario.name,
+        scenarioType: scenario.category,
+        description: result.scenarioDescription,
+        equityShock: (scenario.shocks.equity ?? 0).toString(),
+        rateShock: (scenario.shocks.rates ?? 0).toString(),
+        creditSpreadShock: (scenario.shocks.credit ?? 0).toString(),
+        fxShock: (scenario.shocks.fx ?? 0).toString(),
+        portfolioImpact: result.totalImpact.toFixed(6),
+        impactAmount: result.impactAmount.toFixed(2),
+        regime: result.regime || null,
+        scenarioCategory: result.scenarioCategory,
+        commodityShock: (scenario.shocks.commodity ?? 0).toString(),
+        volatilityShock: (scenario.shocks.volatility ?? 0).toString(),
+        inflationShock: (scenario.shocks.inflation ?? 0).toString(),
+        liquidityShock: (scenario.shocks.liquidity ?? 0).toString(),
+        parametricVaR95: result.parametricVaR95.toFixed(6),
+        parametricVaR99: result.parametricVaR99.toFixed(6),
+        cvar95: result.cvar95.toFixed(6),
+        cvar99: result.cvar99.toFixed(6),
+        stressedValue: result.stressedValue.toFixed(2),
+        factorDecomposition: result.factorImpacts,
+        assetImpacts: result.assetImpacts,
+        componentVaR: result.componentVaR,
+        monteCarloStats: result.monteCarloStats || null,
+      });
+
+      res.status(201).json({ stressTest, result });
+    } catch (error: any) {
+      console.error("Enhanced stress test error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  app.post("/api/scenario-engine/reverse-stress-test", async (req, res) => {
+    try {
+      const validation = reverseStressTestSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Invalid input",
+          errors: validation.error.flatten().fieldErrors,
+        });
+      }
+
+      const { targetLoss, portfolioId: reqPortfolioId, portfolioType, direction } = validation.data;
+
+      const { holdings, portfolioValue, portfolioId } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const result = engine.reverseStressTest(holdings, targetLoss, portfolioValue, direction);
+
+      const shocks = result.requiredShocks;
+      await storage.createStressTest({
+        portfolioId,
+        scenarioName: `Reverse: ${(targetLoss * 100).toFixed(0)}% loss`,
+        scenarioType: "reverse",
+        description: result.scenarioDescription,
+        equityShock: (shocks.equity ?? 0).toString(),
+        rateShock: (shocks.rates ?? 0).toString(),
+        creditSpreadShock: (shocks.credit ?? 0).toString(),
+        fxShock: (shocks.fx ?? 0).toString(),
+        portfolioImpact: result.achievedLoss.toFixed(6),
+        impactAmount: (portfolioValue * result.achievedLoss).toFixed(2),
+        regime: "crisis",
+        scenarioCategory: "reverse",
+        commodityShock: (shocks.commodity ?? 0).toString(),
+        volatilityShock: (shocks.volatility ?? 0).toString(),
+        inflationShock: (shocks.inflation ?? 0).toString(),
+        liquidityShock: (shocks.liquidity ?? 0).toString(),
+      });
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Reverse stress test error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  app.post("/api/scenario-engine/compare", async (req, res) => {
+    try {
+      const schema = z.object({
+        scenarios: z.array(z.object({
+          name: z.string(),
+          description: z.string().optional().default(""),
+          category: z.enum(["historical", "hypothetical", "reverse", "monte_carlo"]).default("hypothetical"),
+          regime: z.enum(["expansion", "contraction", "crisis"]).optional(),
+          shocks: z.object({
+            equity: z.number().optional(),
+            rates: z.number().optional(),
+            credit: z.number().optional(),
+            fx: z.number().optional(),
+            commodity: z.number().optional(),
+            volatility: z.number().optional(),
+            inflation: z.number().optional(),
+            liquidity: z.number().optional(),
+          }),
+        })).min(1).max(20),
+        portfolioId: z.string().optional(),
+        portfolioType: z.enum(["core", "custom"]).optional(),
+      });
+
+      const validation = schema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Invalid input",
+          errors: validation.error.flatten().fieldErrors,
+        });
+      }
+
+      const { scenarios, portfolioId: reqPortfolioId, portfolioType } = validation.data;
+
+      const { holdings, portfolioValue } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const scenarioDefs: ScenarioDefinition[] = scenarios.map(s => ({
+        name: s.name,
+        description: s.description || "",
+        category: s.category,
+        regime: s.regime,
+        shocks: s.shocks,
+      }));
+
+      const result = engine.compareScenarios(holdings, scenarioDefs, portfolioValue);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Scenario comparison error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  app.post("/api/scenario-engine/run-all-presets", async (req, res) => {
+    try {
+      const schema = z.object({
+        portfolioId: z.string().optional(),
+        portfolioType: z.enum(["core", "custom"]).optional(),
+      });
+
+      const validation = schema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ message: "Invalid input" });
+      }
+
+      const { portfolioId: reqPortfolioId, portfolioType } = validation.data;
+
+      const { holdings, portfolioValue } = await resolvePortfolioForScenario(
+        reqPortfolioId, portfolioType
+      );
+
+      if (holdings.length === 0) {
+        return res.status(400).json({ message: "Portfolio has no holdings" });
+      }
+
+      const engine = new ScenarioEngine();
+      const result = engine.runAllPresets(holdings, portfolioValue);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Run all presets error:", error);
+      if (error.message === "Portfolio not found" || error.message === "Custom portfolio not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  app.post("/api/stress-tests/monte-carlo", async (req, res) => {
+    try {
+      const { portfolioId, portfolioType, scenarios } = req.body;
+
+      let dailyReturns: number[] = [];
+
+      if (portfolioType === "custom" && portfolioId) {
+        const backtests = await storage.getBacktestResults(portfolioId);
+        const latestBacktest = backtests.length > 0 ? backtests[0] : null;
+        if (latestBacktest?.equityCurve) {
+          const curve = Array.isArray(latestBacktest.equityCurve)
+            ? latestBacktest.equityCurve as number[]
+            : [];
+          for (let i = 1; i < curve.length; i++) {
+            if (curve[i - 1] > 0) {
+              dailyReturns.push((curve[i] - curve[i - 1]) / curve[i - 1]);
+            }
+          }
+        }
+      } else {
+        const pid = portfolioId || await getDefaultPortfolioId();
+        const performanceHistory = await storage.getPerformanceHistory(pid);
+        if (performanceHistory.length > 0) {
+          const sorted = performanceHistory.sort((a, b) =>
+            new Date(a.date).getTime() - new Date(b.date).getTime()
+          );
+          dailyReturns = sorted.map(p => parseFloat(p.dailyReturn || "0"));
+        }
+      }
+
+      if (dailyReturns.length < 20) {
+        return res.json({ results: [], message: "Insufficient return history for Monte Carlo simulation" });
+      }
+
+      const defaultScenarios = scenarios || [
+        { name: "Base Case", meanShift: 0, volMultiplier: 1.0 },
+        { name: "Mild Stress", meanShift: -0.05, volMultiplier: 1.5 },
+        { name: "Moderate Crisis", meanShift: -0.10, volMultiplier: 2.0 },
+        { name: "Severe Crisis", meanShift: -0.20, volMultiplier: 3.0 },
+        { name: "Black Swan", meanShift: -0.35, volMultiplier: 4.0 },
+      ];
+
+      const results = defaultScenarios.map((scenario: any) =>
+        runMonteCarloStress(dailyReturns, scenario, 200, 252)
+      );
+
+      res.json({ results });
+    } catch (error) {
+      console.error("Monte Carlo stress error:", error);
       res.status(500).json({ message: "Internal server error" });
     }
   });
@@ -1198,7 +2060,7 @@ export async function registerRoutes(
       const uploadMetadataSchema = z.object({
         fileName: z.string().min(1).max(500),
         fileType: z.string().min(1),
-        fileSize: z.number().positive().max(10 * 1024 * 1024),
+        fileSize: z.number().positive().max(50 * 1024 * 1024),
       });
       
       const metadataResult = uploadMetadataSchema.safeParse({ 
@@ -1894,6 +2756,24 @@ export async function registerRoutes(
       let textContent = "";
       const ext = originalname.toLowerCase().slice(originalname.lastIndexOf("."));
       let historicalReturns: { date: string; returnValue: string }[] = [];
+      let detectedFrequency: string | null = null;
+
+      // Helper to infer frequency from date spacing
+      const inferFrequencyFromDates = (returns: { date: string }[]): string => {
+        if (returns.length < 2) return "monthly";
+        const sorted = [...returns].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        const gaps: number[] = [];
+        for (let i = 1; i < Math.min(sorted.length, 10); i++) {
+          const diff = (new Date(sorted[i].date).getTime() - new Date(sorted[i - 1].date).getTime()) / (1000 * 60 * 60 * 24);
+          gaps.push(diff);
+        }
+        const medianGap = gaps.sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+        if (medianGap <= 5) return "daily";
+        if (medianGap <= 10) return "weekly";
+        if (medianGap <= 45) return "monthly";
+        if (medianGap <= 120) return "quarterly";
+        return "annual";
+      };
 
       // Helper to parse return values
       const parseReturnValue = (val: string | number): number | null => {
@@ -1929,8 +2809,140 @@ export async function registerRoutes(
       // Extract text and historical returns based on file type
       if (mimetype === "application/pdf" || ext === ".pdf") {
         textContent = await extractPdfText(buffer);
+        
+        // Use AI to scan PDF text for historical return data (tables, performance series)
+        if (textContent && textContent.trim().length >= 50) {
+          try {
+            const OpenAI = (await import("openai")).default;
+            const openai = new OpenAI({
+              apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+              baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+            });
+
+            const ocrPrompt = `You are analyzing an investment document for historical return data. Scan the text below for any tables, lists, or series of periodic returns (monthly, quarterly, or annual performance data).
+
+Look for patterns like:
+- Monthly/quarterly/annual return tables with dates and percentage returns
+- Performance history sections with date-return pairs
+- NAV history that can be converted to returns
+- Track record data showing periodic performance
+
+Extract ALL individual return data points you can find. Return them as a JSON array of objects with "date" (ISO format YYYY-MM-DD) and "returnValue" (as a decimal, e.g., 0.05 for 5%).
+
+If you find NAV/price data instead of returns, calculate period-over-period returns from the NAV values.
+
+IMPORTANT:
+- Return ONLY valid JSON: { "returns": [...], "frequency": "daily|weekly|monthly|quarterly|annual" }
+- If NO historical return data is found, return: { "returns": [], "frequency": null }
+- Convert all percentages to decimals (5% = 0.05, -2.3% = -0.023)
+- Include as many data points as possible
+- For dates without a specific day, use the 1st of the month (e.g., "Jan 2023" -> "2023-01-01")
+- The "frequency" field should indicate how often the returns are reported: daily, weekly, monthly, quarterly, or annual
+
+Document text:
+${textContent.substring(0, 12000)}`;
+
+            const ocrResponse = await openai.chat.completions.create({
+              model: "gpt-4o",
+              messages: [
+                { role: "system", content: "You are a financial data extraction specialist. Extract structured return data from investment documents. Return only valid JSON." },
+                { role: "user", content: ocrPrompt }
+              ],
+              temperature: 0.1,
+              max_tokens: 4000,
+            });
+
+            const ocrContent = ocrResponse.choices[0]?.message?.content || "{}";
+            const cleanOcr = ocrContent.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+            const ocrData = JSON.parse(cleanOcr);
+            
+            if (ocrData.returns && Array.isArray(ocrData.returns) && ocrData.returns.length >= 3) {
+              for (const entry of ocrData.returns) {
+                const dateObj = new Date(entry.date);
+                const returnNum = typeof entry.returnValue === "number" ? entry.returnValue : parseFloat(String(entry.returnValue));
+                if (!isNaN(dateObj.getTime()) && !isNaN(returnNum)) {
+                  historicalReturns.push({
+                    date: dateObj.toISOString(),
+                    returnValue: returnNum.toString(),
+                  });
+                }
+              }
+              if (ocrData.frequency) {
+                detectedFrequency = ocrData.frequency;
+              }
+            }
+          } catch (ocrError) {
+            console.error("PDF return data extraction error:", ocrError);
+          }
+        }
       } else if (mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || ext === ".docx") {
         textContent = await extractDocxText(buffer);
+        
+        // Use AI to scan DOCX text for historical return data
+        if (textContent && textContent.trim().length >= 50) {
+          try {
+            const OpenAI = (await import("openai")).default;
+            const openai = new OpenAI({
+              apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+              baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+            });
+
+            const ocrPrompt = `You are analyzing an investment document for historical return data. Scan the text below for any tables, lists, or series of periodic returns (daily, weekly, monthly, quarterly, or annual performance data).
+
+Look for patterns like:
+- Return tables with dates and percentage returns at any frequency
+- Performance history sections with date-return pairs
+- NAV/price history that can be converted to returns
+- Track record data showing periodic performance
+
+Extract ALL individual return data points you can find. Return them as a JSON array of objects with "date" (ISO format YYYY-MM-DD) and "returnValue" (as a decimal, e.g., 0.05 for 5%).
+
+If you find NAV/price data instead of returns, calculate period-over-period returns from the NAV values.
+
+IMPORTANT:
+- Return ONLY valid JSON: { "returns": [...], "frequency": "daily|weekly|monthly|quarterly|annual" }
+- If NO historical return data is found, return: { "returns": [], "frequency": null }
+- Convert all percentages to decimals (5% = 0.05, -2.3% = -0.023)
+- Include as many data points as possible
+- For dates without a specific day, use the 1st of the month (e.g., "Jan 2023" -> "2023-01-01")
+- The "frequency" field should indicate how often the returns are reported: daily, weekly, monthly, quarterly, or annual
+
+Document text:
+${textContent.substring(0, 12000)}`;
+
+            const ocrResponse = await openai.chat.completions.create({
+              model: "gpt-4o",
+              messages: [
+                { role: "system", content: "You are a financial data extraction specialist. Extract structured return data from investment documents. Return only valid JSON." },
+                { role: "user", content: ocrPrompt }
+              ],
+              temperature: 0.1,
+              max_tokens: 4000,
+            });
+
+            const ocrContent = ocrResponse.choices[0]?.message?.content || "{}";
+            const cleanOcr = ocrContent.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+            const ocrData = JSON.parse(cleanOcr);
+            
+            if (ocrData.returns && Array.isArray(ocrData.returns) && ocrData.returns.length >= 3) {
+              for (const entry of ocrData.returns) {
+                const dateObj = new Date(entry.date);
+                const returnNum = typeof entry.returnValue === "number" ? entry.returnValue : parseFloat(String(entry.returnValue));
+                if (!isNaN(dateObj.getTime()) && !isNaN(returnNum)) {
+                  historicalReturns.push({
+                    date: dateObj.toISOString(),
+                    returnValue: returnNum.toString(),
+                  });
+                }
+              }
+              if (ocrData.frequency) {
+                detectedFrequency = ocrData.frequency;
+              }
+            }
+          } catch (ocrError) {
+            console.error("DOCX return data extraction error:", ocrError);
+          }
+        }
       } else if (ext === ".xlsx" || ext === ".xls") {
         textContent = extractExcelText(buffer);
         
@@ -2014,18 +3026,33 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate historical volatility from returns if we have them
+      // Calculate expected return and volatility from historical returns if we have them
       let calculatedVolatility: number | null = null;
+      let calculatedExpectedReturn: number | null = null;
       if (historicalReturns.length >= 3) {
         const returns = historicalReturns.map(r => parseFloat(r.returnValue));
         const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
         const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
         const stdDev = Math.sqrt(variance);
-        // Annualize assuming monthly returns (multiply by sqrt(12))
-        calculatedVolatility = stdDev * Math.sqrt(12);
+        
+        // Determine annualization factor: use AI-detected frequency, or infer from date spacing
+        const frequency = detectedFrequency || inferFrequencyFromDates(historicalReturns);
+        let periodsPerYear = 12; // default: monthly
+        if (frequency === "quarterly") {
+          periodsPerYear = 4;
+        } else if (frequency === "annual" || frequency === "yearly") {
+          periodsPerYear = 1;
+        } else if (frequency === "weekly") {
+          periodsPerYear = 52;
+        } else if (frequency === "daily") {
+          periodsPerYear = 252;
+        }
+        
+        calculatedVolatility = stdDev * Math.sqrt(periodsPerYear);
+        calculatedExpectedReturn = mean * periodsPerYear;
       }
 
-      // Use OpenAI to extract strategy details (only for name, type, description - not returns/volatility)
+      // Use OpenAI to extract strategy details including performance figures from the document
       let extractedInfo: any = {};
       
       if (textContent && textContent.trim().length >= 20) {
@@ -2042,19 +3069,22 @@ Extract the following fields if available (return null for fields not found):
 {
   "name": "Strategy/Fund name",
   "ticker": "Ticker symbol if public (e.g., SPY, QQQ)",
-  "strategyType": "One of: Investment, ETF, Mutual Fund, Hedge Fund, Private Equity, Venture Capital, Real Estate Fund, Credit Strategy, Macro Strategy, Long/Short Equity, Event Driven, Distressed, Multi-Strategy, Managed Account, Co-Investment, Direct Investment, Custom Strategy, Other",
+  "strategyType": "One of: Investment, ETF, Mutual Fund, Hedge Fund, Private Equity, Venture Capital, Real Assets Fund, Credit Strategy, Macro Strategy, Long/Short Equity, Event Driven, Distressed, Multi-Strategy, Managed Account, Co-Investment, Direct Investment, Custom Strategy, Other",
   "assetClass": "One of: US Equity, International Equity, Emerging Markets, Fixed Income, High Yield, Real Estate, Commodities, Alternatives, Private Equity, Hedge Funds, Cash, Other",
-  "description": "Brief description of the strategy focus and approach (2-3 sentences)"
+  "description": "Brief description of the strategy focus and approach (2-3 sentences)",
+  "expectedReturn": "Target or historical annualized net return as a decimal (e.g., 0.12 for 12%). Look for terms like 'target return', 'net IRR', 'annualized return', 'net annual return', 'target net return'. Convert percentages to decimals.",
+  "volatility": "Annualized volatility/standard deviation as a decimal (e.g., 0.15 for 15%). Look for terms like 'volatility', 'standard deviation', 'annualized risk'."
 }
 
 IMPORTANT: 
 - Match strategyType and assetClass exactly to one of the provided options
 - Return valid JSON only, no additional text
 - If a field cannot be determined, use null
-- Do NOT include expectedReturn or volatility - those will be calculated from historical data
+- For expectedReturn and volatility, express as decimals not percentages (e.g., 12% = 0.12)
+- For expectedReturn, prefer NET returns over gross. If a range is given (e.g., "10-15%"), use the midpoint (0.125)
 
 Document content:
-${textContent.substring(0, 6000)}`;
+${textContent.substring(0, 8000)}`;
 
         try {
           const response = await openai.chat.completions.create({
@@ -2072,19 +3102,33 @@ ${textContent.substring(0, 6000)}`;
           extractedInfo = JSON.parse(cleanContent);
         } catch (aiError) {
           console.error("AI extraction error:", aiError);
-          // Continue without AI extraction - we still have historical data
         }
       }
 
-      // Add calculated volatility to extracted info
+      // Calculated values from historical returns take priority over AI-extracted values
+      // since they're derived from actual data
+      if (calculatedExpectedReturn !== null) {
+        extractedInfo.expectedReturn = calculatedExpectedReturn;
+        extractedInfo.expectedReturnSource = "calculated";
+      } else if (extractedInfo.expectedReturn != null) {
+        extractedInfo.expectedReturnSource = "document";
+      }
+
       if (calculatedVolatility !== null) {
         extractedInfo.volatility = calculatedVolatility;
+        extractedInfo.volatilitySource = "calculated";
+      } else if (extractedInfo.volatility != null) {
+        extractedInfo.volatilitySource = "document";
       }
+
+      // Use date-inferred frequency as final fallback for response
+      const reportedFrequency = detectedFrequency || (historicalReturns.length >= 2 ? inferFrequencyFromDates(historicalReturns) : null);
 
       res.json({ 
         extracted: extractedInfo,
         historicalReturns: historicalReturns,
         returnsCount: historicalReturns.length,
+        returnFrequency: reportedFrequency,
         fileName: originalname
       });
     } catch (error: any) {
@@ -2428,7 +3472,7 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
 
   const returnsUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: 50 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
       const ext = file.originalname.toLowerCase().slice(file.originalname.lastIndexOf("."));
       const allowedExtensions = [".csv", ".xlsx", ".xls", ".pdf"];
@@ -2795,6 +3839,7 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
       for (const item of items) {
         await storage.createCustomPortfolioItem({
           customPortfolioId: portfolio.id,
+          strategyId: item.strategyId,
           ticker: item.ticker,
           name: item.name,
           assetClass: item.assetClass,
@@ -2832,6 +3877,7 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
       for (const item of items) {
         await storage.createCustomPortfolioItem({
           customPortfolioId: id,
+          strategyId: item.strategyId,
           ticker: item.ticker,
           name: item.name,
           assetClass: item.assetClass,
@@ -3272,6 +4318,16 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
       const timePeriod = req.query.timePeriod as BenchmarkTimePeriod | undefined;
       const cadence = req.query.cadence as Cadence | undefined;
 
+      // Try to refresh from API if no data exists
+      const benchmark = await storage.getBenchmark(id);
+      const apiKey = process.env.ALPHA_VANTAGE_API_KEY || "";
+      if (benchmark && apiKey) {
+        const existingReturns = await storage.getBenchmarkReturns(id);
+        if (existingReturns.length === 0) {
+          await refreshBenchmarkReturns(id, benchmark.ticker, apiKey);
+        }
+      }
+
       // Fetch the full time series from the database
       const rawReturns = await storage.getBenchmarkReturns(id);
 
@@ -3299,6 +4355,26 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     } catch (error: any) {
       console.error("Get benchmark returns error:", error);
       res.status(500).json({ message: "Failed to fetch benchmark returns" });
+    }
+  });
+
+  app.post("/api/benchmarks/:id/refresh", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+      if (!apiKey) {
+        return res.status(400).json({ message: "Alpha Vantage API key not configured" });
+      }
+      const success = await refreshSingleBenchmark(id, apiKey);
+      if (success) {
+        const returns = await storage.getBenchmarkReturns(id);
+        res.json({ message: "Benchmark data refreshed", returnsCount: returns.length });
+      } else {
+        res.status(500).json({ message: "Failed to refresh benchmark data" });
+      }
+    } catch (error: any) {
+      console.error("Refresh benchmark error:", error);
+      res.status(500).json({ message: "Failed to refresh benchmark data" });
     }
   });
 
@@ -3479,6 +4555,179 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     } catch (error: any) {
       console.error("Get composite benchmark returns error:", error);
       res.status(500).json({ message: "Failed to fetch composite benchmark returns" });
+    }
+  });
+
+  // ===== Interval Funds Routes =====
+
+  app.get("/api/interval-funds", async (req, res) => {
+    try {
+      const funds = await storage.getIntervalFunds();
+      res.json({ funds });
+    } catch (error: any) {
+      console.error("Get interval funds error:", error);
+      res.status(500).json({ message: "Failed to fetch interval funds" });
+    }
+  });
+
+  app.get("/api/interval-funds-stats", async (req, res) => {
+    try {
+      const funds = await storage.getIntervalFunds();
+      const n = funds.length;
+      if (n === 0) {
+        return res.json({ stats: { totalFunds: 0, totalAum: 0, avgExpenseRatio: 0, avgDistributionRate: 0, avg1yrReturn: 0, avgSharpeRatio: 0, topPerformers: [], highestYielding: [], bestRiskAdjusted: [], lowestCost: [], categoryBreakdown: {} } });
+      }
+      const totalAum = funds.reduce((sum, f) => sum + (parseFloat(f.totalAum || "0")), 0);
+      const avgExpenseRatio = funds.reduce((sum, f) => sum + (parseFloat(f.expenseRatio || "0")), 0) / n;
+      const avgDistributionRate = funds.reduce((sum, f) => sum + (parseFloat(f.distributionRate || "0")), 0) / n;
+      const avg1yrReturn = funds.reduce((sum, f) => sum + (parseFloat(f.nav1yrReturn || "0")), 0) / n;
+      const avgSharpeRatio = funds.reduce((sum, f) => sum + (parseFloat(f.sharpeRatio || "0")), 0) / n;
+      const sorted = (key: string, dir: "asc" | "desc" = "desc") => [...funds].sort((a, b) => dir === "desc" ? parseFloat((b as any)[key] || "0") - parseFloat((a as any)[key] || "0") : parseFloat((a as any)[key] || "0") - parseFloat((b as any)[key] || "0")).slice(0, 5).map(f => ({ id: f.id, name: f.name, ticker: f.ticker, assetClass: f.assetClass, [key]: (f as any)[key] }));
+      const categoryBreakdown: Record<string, { count: number; totalAum: number; avgReturn: number }> = {};
+      funds.forEach(f => {
+        if (!categoryBreakdown[f.assetClass]) categoryBreakdown[f.assetClass] = { count: 0, totalAum: 0, avgReturn: 0 };
+        categoryBreakdown[f.assetClass].count++;
+        categoryBreakdown[f.assetClass].totalAum += parseFloat(f.totalAum || "0");
+        categoryBreakdown[f.assetClass].avgReturn += parseFloat(f.nav1yrReturn || "0");
+      });
+      Object.keys(categoryBreakdown).forEach(k => { categoryBreakdown[k].avgReturn /= categoryBreakdown[k].count; });
+      res.json({ stats: { totalFunds: n, totalAum, avgExpenseRatio, avgDistributionRate, avg1yrReturn, avgSharpeRatio, topPerformers: sorted("nav1yrReturn"), highestYielding: sorted("distributionRate"), bestRiskAdjusted: sorted("sharpeRatio"), lowestCost: sorted("expenseRatio", "asc"), categoryBreakdown } });
+    } catch (error: any) {
+      console.error("Get interval funds stats error:", error);
+      res.status(500).json({ message: "Failed to fetch interval fund statistics" });
+    }
+  });
+
+  app.get("/api/interval-funds-compare", async (req, res) => {
+    try {
+      const funds = await storage.getIntervalFunds();
+      const riskFreeRate = 0.0359;
+      const analyses = compareIntervalFunds(funds, riskFreeRate);
+      res.json({ analyses });
+    } catch (error: any) {
+      console.error("Compare interval funds error:", error);
+      res.status(500).json({ message: "Failed to compare interval funds" });
+    }
+  });
+
+  app.get("/api/interval-funds-data-quality", async (req, res) => {
+    try {
+      const funds = await storage.getIntervalFunds();
+      const report = generateDataQualityReport(funds);
+      res.json({ report });
+    } catch (error: any) {
+      console.error("Validate interval funds error:", error);
+      res.status(500).json({ message: "Failed to validate interval funds" });
+    }
+  });
+
+  app.get("/api/interval-funds/:id/analyze", async (req, res) => {
+    try {
+      const fund = await storage.getIntervalFund(req.params.id);
+      if (!fund) return res.status(404).json({ message: "Interval fund not found" });
+      const allFunds = await storage.getIntervalFunds();
+      const riskFreeRate = 0.0359;
+      const analysis = analyzeIntervalFund({ fund, riskFreeRate, peerFunds: allFunds });
+      res.json({ analysis });
+    } catch (error: any) {
+      console.error("Analyze interval fund error:", error);
+      res.status(500).json({ message: "Failed to analyze interval fund" });
+    }
+  });
+
+  app.get("/api/interval-funds/:id/validate", async (req, res) => {
+    try {
+      const fund = await storage.getIntervalFund(req.params.id);
+      if (!fund) return res.status(404).json({ message: "Interval fund not found" });
+      const validation = validateIntervalFund(fund);
+      res.json({ validation });
+    } catch (error: any) {
+      console.error("Validate interval fund error:", error);
+      res.status(500).json({ message: "Failed to validate interval fund" });
+    }
+  });
+
+  app.get("/api/interval-funds/:id", async (req, res) => {
+    try {
+      const fund = await storage.getIntervalFund(req.params.id);
+      if (!fund) return res.status(404).json({ message: "Interval fund not found" });
+      res.json(fund);
+    } catch (error: any) {
+      console.error("Get interval fund error:", error);
+      res.status(500).json({ message: "Failed to fetch interval fund" });
+    }
+  });
+
+  app.post("/api/interval-funds", async (req, res) => {
+    try {
+      const fund = await storage.createIntervalFund(req.body);
+      res.status(201).json(fund);
+    } catch (error: any) {
+      console.error("Create interval fund error:", error);
+      res.status(500).json({ message: "Failed to create interval fund" });
+    }
+  });
+
+  app.patch("/api/interval-funds/:id", async (req, res) => {
+    try {
+      const fund = await storage.updateIntervalFund(req.params.id, req.body);
+      if (!fund) return res.status(404).json({ message: "Interval fund not found" });
+      res.json(fund);
+    } catch (error: any) {
+      console.error("Update interval fund error:", error);
+      res.status(500).json({ message: "Failed to update interval fund" });
+    }
+  });
+
+  app.delete("/api/interval-funds/:id", async (req, res) => {
+    try {
+      await storage.deleteIntervalFund(req.params.id);
+      res.json({ message: "Interval fund deleted" });
+    } catch (error: any) {
+      console.error("Delete interval fund error:", error);
+      res.status(500).json({ message: "Failed to delete interval fund" });
+    }
+  });
+
+  // ===== Interval Fund Universe Search Routes =====
+
+  app.get("/api/interval-funds-universe/search", async (req, res) => {
+    try {
+      const query = req.query.q as string;
+      if (!query || query.trim().length < 2) {
+        return res.status(400).json({ message: "Search query must be at least 2 characters" });
+      }
+      const alphaVantageKey = process.env.ALPHA_VANTAGE_API_KEY || "";
+      const results = await searchIntervalFundUniverse(query.trim(), alphaVantageKey);
+      res.json(results);
+    } catch (error: any) {
+      console.error("Universe search error:", error);
+      res.status(500).json({ message: "Failed to search interval fund universe" });
+    }
+  });
+
+  app.post("/api/interval-funds-universe/import", async (req, res) => {
+    try {
+      const { fund } = req.body as { fund: ReconciledFund };
+      if (!fund || !fund.name) {
+        return res.status(400).json({ message: "Fund data is required" });
+      }
+
+      const existing = await storage.getIntervalFunds();
+      const duplicate = existing.find(e =>
+        (fund.ticker && e.ticker && e.ticker.toUpperCase() === fund.ticker.toUpperCase()) ||
+        e.name.toLowerCase() === fund.name.toLowerCase()
+      );
+      if (duplicate) {
+        return res.status(409).json({ message: `Fund "${duplicate.name}" already exists in your database`, existingFund: duplicate });
+      }
+
+      const insertData = reconciledToInsert(fund);
+      const created = await storage.createIntervalFund(insertData);
+      res.status(201).json({ fund: created, message: "Fund imported successfully" });
+    } catch (error: any) {
+      console.error("Import fund error:", error);
+      res.status(500).json({ message: "Failed to import fund" });
     }
   });
 

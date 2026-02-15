@@ -24,6 +24,7 @@ import {
   compositeBenchmarks,
   compositeBenchmarkComponents,
   fundFolders,
+  intervalFunds,
   type Portfolio,
   type Holding,
   type PerformanceHistory,
@@ -66,6 +67,8 @@ import {
   type CompositeBenchmarkComponent,
   type InsertCompositeBenchmark,
   type InsertCompositeBenchmarkComponent,
+  type IntervalFund,
+  type InsertIntervalFund,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -176,6 +179,12 @@ export interface IStorage {
   moveStrategyToFolder(strategyId: string, folderId: string | null): Promise<StrategyLibrary | undefined>;
   moveDocumentToFolder(documentId: string, folderId: string | null): Promise<DataRoomDocument | undefined>;
   moveMemoToFolder(memoId: string, folderId: string | null): Promise<InvestmentMemo | undefined>;
+  
+  getIntervalFunds(): Promise<IntervalFund[]>;
+  getIntervalFund(id: string): Promise<IntervalFund | undefined>;
+  createIntervalFund(fund: InsertIntervalFund): Promise<IntervalFund>;
+  updateIntervalFund(id: string, updates: Partial<InsertIntervalFund>): Promise<IntervalFund | undefined>;
+  deleteIntervalFund(id: string): Promise<void>;
   
   sessionStore: session.Store;
 }
@@ -691,6 +700,32 @@ export class DatabaseStorage implements IStorage {
       .where(eq(investmentMemos.id, memoId))
       .returning();
     return updated;
+  }
+
+  async getIntervalFunds(): Promise<IntervalFund[]> {
+    return await db.select().from(intervalFunds);
+  }
+
+  async getIntervalFund(id: string): Promise<IntervalFund | undefined> {
+    const [fund] = await db.select().from(intervalFunds).where(eq(intervalFunds.id, id));
+    return fund;
+  }
+
+  async createIntervalFund(fund: InsertIntervalFund): Promise<IntervalFund> {
+    const [created] = await db.insert(intervalFunds).values(fund).returning();
+    return created;
+  }
+
+  async updateIntervalFund(id: string, updates: Partial<InsertIntervalFund>): Promise<IntervalFund | undefined> {
+    const [updated] = await db.update(intervalFunds)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(intervalFunds.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteIntervalFund(id: string): Promise<void> {
+    await db.delete(intervalFunds).where(eq(intervalFunds.id, id));
   }
 }
 

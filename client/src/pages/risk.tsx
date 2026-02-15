@@ -1,12 +1,16 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
-import { AlertTriangle, Shield, Activity, TrendingDown, BarChart3, Info } from "lucide-react";
+import { useAllBenchmarks } from "@/hooks/use-all-benchmarks";
+import { detectDataFrequency, formatDateForFrequency, getFrequencyLabel, getXAxisTickInterval } from "@/lib/data-frequency";
+import { AlertTriangle, Shield, Activity, TrendingDown, BarChart3, Info, Scale, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { MetricCard } from "@/components/metric-card";
 import { ChartSkeleton, MetricCardSkeleton } from "@/components/loading-skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
   AreaChart,
@@ -27,6 +31,9 @@ import {
   LineChart,
   Line,
   Legend,
+  PieChart,
+  Pie,
+  Cell,
 } from "recharts";
 import type { Portfolio, RiskMetrics, PerformanceHistory, Benchmark, BenchmarkReturn } from "@shared/schema";
 
@@ -87,6 +94,10 @@ interface PortfolioOptionsData {
 
 export default function RiskPage() {
   const { selectedPortfolioId, selectedPortfolioType, selectedPortfolio, selectedBenchmarkId: globalBenchmarkId, selectedBenchmark, selectedTimePeriod } = usePortfolio();
+  const [localBenchmarkId, setLocalBenchmarkId] = useState<string>("");
+  const [advancedMethodologyExpanded, setAdvancedMethodologyExpanded] = useState(false);
+  const [selectedBenchmarkType, setSelectedBenchmarkType] = useState<"standard" | "composite">("standard");
+  const { allBenchmarks: allBenchmarksList, isLoading: isLoadingBenchmarks } = useAllBenchmarks();
 
   // Use the global benchmark from sidebar - determine type and API ID
   const isCompositeBenchmark = selectedBenchmark?.isComposite === true;
@@ -95,12 +106,18 @@ export default function RiskPage() {
     ? selectedBenchmarkId.replace("composite-", "")
     : selectedBenchmarkId;
 
-  const riskUrl = selectedPortfolioId
-    ? `/api/risk?portfolioId=${selectedPortfolioId}&portfolioType=${selectedPortfolioType}`
-    : "/api/risk";
+  const riskParams = new URLSearchParams();
+  if (selectedPortfolioId) {
+    riskParams.set("portfolioId", selectedPortfolioId);
+    riskParams.set("portfolioType", selectedPortfolioType);
+  }
+  if (selectedBenchmarkId) {
+    riskParams.set("benchmarkId", selectedBenchmarkId);
+  }
+  const riskUrl = `/api/risk?${riskParams.toString()}`;
 
   const { data, isLoading, error } = useQuery<RiskData & { isCustomPortfolio?: boolean }>({
-    queryKey: ["/api/risk", selectedPortfolioId, selectedPortfolioType],
+    queryKey: ["/api/risk", selectedPortfolioId, selectedPortfolioType, selectedBenchmarkId],
     queryFn: async () => {
       const res = await fetch(riskUrl, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch risk data");
@@ -124,6 +141,68 @@ export default function RiskPage() {
       return res.json();
     },
     enabled: !!benchmarkApiId,
+  });
+
+  const advancedRiskParams = new URLSearchParams();
+  if (selectedPortfolioId) {
+    advancedRiskParams.set("portfolioId", selectedPortfolioId);
+    advancedRiskParams.set("portfolioType", selectedPortfolioType);
+  }
+  if (selectedBenchmarkId) {
+    advancedRiskParams.set("benchmarkId", selectedBenchmarkId);
+  }
+
+  const { data: advancedRiskData } = useQuery<{
+    advancedTail: {
+      cornishFisherVaR95: number;
+      cornishFisherVaR99: number;
+      parametricES95: number;
+      parametricES99: number;
+      historicalES95: number;
+      historicalES99: number;
+      modifiedSharpe: number;
+      excessKurtosisAdjustedVol: number;
+      maxDrawdownDuration: number;
+      averageDrawdownDuration: number;
+      currentDrawdown: number;
+      drawdownRecoveryDays: number | null;
+      conditionalDrawdown95: number;
+    };
+    componentRisk: {
+      name: string;
+      assetClass: string;
+      weight: number;
+      marginalContribution: number;
+      componentContribution: number;
+      percentContribution: number;
+    }[];
+    factorDecomposition: {
+      systematicRisk: number;
+      idiosyncraticRisk: number;
+      totalRisk: number;
+      systematicPct: number;
+      idiosyncraticPct: number;
+      rSquared: number;
+    };
+    monteCarloStress: {
+      scenarioName: string;
+      numPaths: number;
+      horizon: number;
+      paths: { pathId: number; cumulativeReturns: number[]; finalReturn: number; maxDrawdown: number }[];
+      percentiles: { p5: number; p25: number; p50: number; p75: number; p95: number };
+      expectedReturn: number;
+      expectedVol: number;
+      expectedMaxDrawdown: number;
+      probabilityOfLoss: number;
+      expectedShortfall: number;
+    }[];
+  }>({
+    queryKey: ["/api/risk/advanced", selectedPortfolioId, selectedPortfolioType, selectedBenchmarkId],
+    queryFn: async () => {
+      const res = await fetch(`/api/risk/advanced?${advancedRiskParams.toString()}`, { credentials: "include" });
+      if (!res.ok) return null;
+      return res.json();
+    },
   });
 
   if (isLoading) {
@@ -269,13 +348,15 @@ export default function RiskPage() {
   const mar = riskMetrics?.mar ? parseFloat(riskMetrics.mar) : 0;
 
   const riskLevel = getRiskLevel(sharpe);
+  const dataFrequency = detectDataFrequency(performanceHistory.map(p => p.date));
+  const frequencyLabel = getFrequencyLabel(dataFrequency);
 
   const drawdownData = performanceHistory.map((p, i) => {
     const cumReturn = p.cumulativeReturn ? parseFloat(p.cumulativeReturn) : 0;
     const peak = Math.max(...performanceHistory.slice(0, i + 1).map(pp => pp.cumulativeReturn ? parseFloat(pp.cumulativeReturn) : 0));
     const drawdown = peak > 0 ? ((cumReturn - peak) / (1 + peak)) * 100 : 0;
     return {
-      date: formatDate(p.date),
+      date: formatDateForFrequency(p.date, dataFrequency),
       drawdown: Math.min(0, drawdown),
     };
   });
@@ -417,7 +498,7 @@ export default function RiskPage() {
       const rollingAlpha = annualizedPortfolioReturn - annualizedBenchmarkReturn;
 
       result.push({
-        date: formatDate(sortedHistory[i].date),
+        date: formatDateForFrequency(sortedHistory[i].date, dataFrequency),
         alpha: rollingAlpha * 100,
         portfolioReturn: annualizedPortfolioReturn * 100,
         benchmarkReturn: annualizedBenchmarkReturn * 100,
@@ -522,6 +603,7 @@ export default function RiskPage() {
                   stroke="hsl(var(--muted-foreground))"
                   fontSize={11}
                   tickLine={false}
+                  interval={getXAxisTickInterval(drawdownData.length, dataFrequency)}
                 />
                 <YAxis 
                   stroke="hsl(var(--muted-foreground))"
@@ -737,6 +819,370 @@ export default function RiskPage() {
             ))}
           </div>
         </CardContent>
+      </Card>
+
+      <Card data-testid="card-advanced-tail-risk">
+        <CardHeader>
+          <CardTitle className="text-base font-medium">Advanced Tail Risk & VaR Methodology</CardTitle>
+          <CardDescription>Cornish-Fisher adjusted VaR, Parametric & Historical Expected Shortfall (inspired by Riskfolio-Lib)</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {advancedRiskData?.advancedTail ? (
+            <div className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {[
+                  { label: "Cornish-Fisher VaR (95%)", value: formatPercent(advancedRiskData.advancedTail.cornishFisherVaR95), desc: "Skewness & kurtosis-adjusted VaR" },
+                  { label: "Cornish-Fisher VaR (99%)", value: formatPercent(advancedRiskData.advancedTail.cornishFisherVaR99), desc: "Extreme tail risk with higher moments" },
+                  { label: "Parametric ES (95%)", value: formatPercent(advancedRiskData.advancedTail.parametricES95), desc: "Gaussian expected shortfall" },
+                  { label: "Parametric ES (99%)", value: formatPercent(advancedRiskData.advancedTail.parametricES99), desc: "Extreme parametric expected shortfall" },
+                  { label: "Historical ES (95%)", value: formatPercent(advancedRiskData.advancedTail.historicalES95), desc: "Non-parametric expected shortfall" },
+                  { label: "Historical ES (99%)", value: formatPercent(advancedRiskData.advancedTail.historicalES99), desc: "Extreme historical expected shortfall" },
+                  { label: "Modified Sharpe Ratio", value: (advancedRiskData.advancedTail.modifiedSharpe ?? 0).toFixed(4), desc: "Sharpe adjusted for skewness & kurtosis" },
+                  { label: "Kurtosis-Adjusted Vol", value: formatPercent(advancedRiskData.advancedTail.excessKurtosisAdjustedVol), desc: "Volatility corrected for fat tails" },
+                  { label: "Conditional Drawdown (95%)", value: formatPercent(advancedRiskData.advancedTail.conditionalDrawdown95), desc: "Average of worst 5% drawdowns (CDaR)" },
+                ].map((m) => (
+                  <div key={m.label} className="p-4 border rounded-lg">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-sm font-medium text-muted-foreground">{m.label}</span>
+                      <span className="text-2xl font-semibold">{m.value}</span>
+                      <span className="text-xs text-muted-foreground">{m.desc}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="grid gap-4 md:grid-cols-3 mt-4">
+                <div className="p-4 border rounded-lg">
+                  <span className="text-sm font-medium text-muted-foreground">Max Drawdown Duration</span>
+                  <p className="text-2xl font-semibold">{advancedRiskData.advancedTail.maxDrawdownDuration} <span className="text-sm font-normal text-muted-foreground">days</span></p>
+                </div>
+                <div className="p-4 border rounded-lg">
+                  <span className="text-sm font-medium text-muted-foreground">Avg Drawdown Duration</span>
+                  <p className="text-2xl font-semibold">{(advancedRiskData.advancedTail.averageDrawdownDuration ?? 0).toFixed(0)} <span className="text-sm font-normal text-muted-foreground">days</span></p>
+                </div>
+                <div className="p-4 border rounded-lg">
+                  <span className="text-sm font-medium text-muted-foreground">Current Drawdown</span>
+                  <p className="text-2xl font-semibold">{formatPercent(advancedRiskData.advancedTail.currentDrawdown)}</p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-[200px] text-muted-foreground text-sm">
+              Loading advanced tail risk metrics...
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card data-testid="card-factor-decomposition">
+          <CardHeader>
+            <CardTitle className="text-base font-medium">Factor Risk Decomposition</CardTitle>
+            <CardDescription>Systematic vs idiosyncratic risk (single-factor CAPM model)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {advancedRiskData?.factorDecomposition ? (() => {
+              const fd = advancedRiskData.factorDecomposition;
+              return (
+                <div className="space-y-4">
+                  <div className="flex justify-center">
+                    <ResponsiveContainer width={200} height={200}>
+                      <PieChart>
+                        <Pie
+                          data={[
+                            { name: "Systematic", value: (fd.systematicPct ?? 0) * 100 },
+                            { name: "Idiosyncratic", value: (fd.idiosyncraticPct ?? 0) * 100 },
+                          ]}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={50}
+                          outerRadius={80}
+                          dataKey="value"
+                        >
+                          <Cell fill="hsl(var(--chart-1))" />
+                          <Cell fill="hsl(var(--chart-3))" />
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "hsl(var(--card))",
+                            border: "1px solid hsl(var(--border))",
+                            borderRadius: "6px",
+                            fontSize: 12,
+                          }}
+                          formatter={(value: number) => [`${value.toFixed(1)}%`]}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="space-y-2">
+                    {[
+                      { label: "Systematic Risk", value: formatPercent(fd.systematicRisk), pct: `${((fd.systematicPct ?? 0) * 100).toFixed(1)}%`, color: "bg-[hsl(var(--chart-1))]" },
+                      { label: "Idiosyncratic Risk", value: formatPercent(fd.idiosyncraticRisk), pct: `${((fd.idiosyncraticPct ?? 0) * 100).toFixed(1)}%`, color: "bg-[hsl(var(--chart-3))]" },
+                      { label: "Total Risk", value: formatPercent(fd.totalRisk), pct: "100%", color: "" },
+                      { label: "R-Squared", value: (fd.rSquared ?? 0).toFixed(4), pct: "", color: "" },
+                    ].map((m) => (
+                      <div key={m.label} className="flex items-center justify-between py-2 border-b last:border-0">
+                        <div className="flex items-center gap-2">
+                          {m.color && <span className={`h-2.5 w-2.5 rounded-full ${m.color}`} />}
+                          <span className="text-sm">{m.label}</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {m.pct && <span className="text-xs text-muted-foreground">{m.pct}</span>}
+                          <span className="font-mono text-sm">{m.value}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })() : (
+              <div className="flex items-center justify-center h-[200px] text-muted-foreground text-sm">
+                Loading factor decomposition...
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card data-testid="card-component-risk">
+          <CardHeader>
+            <CardTitle className="text-base font-medium">Component Risk Contribution</CardTitle>
+            <CardDescription>Marginal and component VaR by holding (Euler decomposition)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {advancedRiskData?.componentRisk && advancedRiskData.componentRisk.length > 0 ? (
+              <div className="space-y-3">
+                {advancedRiskData.componentRisk
+                  .sort((a, b) => Math.abs(b.percentContribution) - Math.abs(a.percentContribution))
+                  .slice(0, 10)
+                  .map((cr) => (
+                    <div key={cr.name} className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-sm truncate max-w-[200px]">{cr.name}</span>
+                          <Badge variant="outline" className="text-xs shrink-0">{cr.assetClass}</Badge>
+                        </div>
+                        <span className="font-mono text-sm shrink-0">{((cr.percentContribution ?? 0) * 100).toFixed(1)}%</span>
+                      </div>
+                      <Progress value={Math.abs(cr.percentContribution ?? 0) * 100} className="h-1.5" />
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-[200px] text-muted-foreground text-sm">
+                {advancedRiskData ? "No holdings data available" : "Loading component risk..."}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card data-testid="card-monte-carlo-stress">
+        <CardHeader>
+          <CardTitle className="text-base font-medium">Monte Carlo Stress Scenarios</CardTitle>
+          <CardDescription>Simulated 1-year return distributions under varying stress levels (200 paths each)</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {advancedRiskData?.monteCarloStress && advancedRiskData.monteCarloStress.length > 0 ? (
+            <div className="space-y-6">
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                {advancedRiskData.monteCarloStress.map((mc) => (
+                  <div key={mc.scenarioName} className="p-4 border rounded-lg space-y-3">
+                    <h4 className="text-sm font-medium">{mc.scenarioName}</h4>
+                    <div className="space-y-2">
+                      {[
+                        { label: "Expected Return", value: formatPercent(mc.expectedReturn) },
+                        { label: "P(Loss)", value: `${((mc.probabilityOfLoss ?? 0) * 100).toFixed(0)}%` },
+                        { label: "Expected Shortfall", value: formatPercent(mc.expectedShortfall) },
+                        { label: "Avg Max Drawdown", value: formatPercent(-(mc.expectedMaxDrawdown ?? 0)) },
+                        { label: "5th Percentile", value: formatPercent(mc.percentiles?.p5) },
+                        { label: "95th Percentile", value: formatPercent(mc.percentiles?.p95) },
+                      ].map((item) => (
+                        <div key={item.label} className="flex items-center justify-between">
+                          <span className="text-xs text-muted-foreground">{item.label}</span>
+                          <span className="font-mono text-xs">{item.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-[200px] text-muted-foreground text-sm">
+              {advancedRiskData ? "Insufficient data for Monte Carlo simulation" : "Loading Monte Carlo stress scenarios..."}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="card-advanced-methodology">
+        <CardHeader className="cursor-pointer" onClick={() => setAdvancedMethodologyExpanded(!advancedMethodologyExpanded)}>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <BookOpen className="h-4 w-4 text-cyan-500 shrink-0" />
+              <CardTitle className="text-base font-medium">Advanced Risk Calculation Methodology</CardTitle>
+            </div>
+            <Button variant="ghost" size="icon" className="shrink-0" onClick={(e) => { e.stopPropagation(); setAdvancedMethodologyExpanded(!advancedMethodologyExpanded); }} data-testid="button-toggle-advanced-methodology">
+              {advancedMethodologyExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </Button>
+          </div>
+          <CardDescription>How advanced tail risk, factor decomposition, and component risk metrics are calculated</CardDescription>
+        </CardHeader>
+        {advancedMethodologyExpanded && (
+          <CardContent className="space-y-6">
+            <div className="space-y-1.5">
+              <h4 className="text-sm font-medium text-muted-foreground">Overview</h4>
+              <p className="text-sm">
+                The advanced risk engine extends traditional VaR and Sharpe metrics by incorporating higher-moment statistics (skewness and kurtosis), non-parametric tail analysis, factor-based risk attribution, and Euler decomposition for component-level risk contributions. These methods are inspired by professional risk libraries including Riskfolio-Lib and skfolio.
+              </p>
+            </div>
+
+            <div className="space-y-4 border-t pt-4">
+              <h4 className="text-sm font-semibold">Tail Risk & VaR Metrics</h4>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Cornish-Fisher VaR</h4>
+                <p className="text-sm">
+                  Standard Value-at-Risk assumes returns follow a normal (bell curve) distribution, but real portfolios exhibit skewness (asymmetric tails) and excess kurtosis (fatter tails). Cornish-Fisher VaR adjusts the quantile using the portfolio's actual third and fourth moments:
+                </p>
+                <div className="bg-muted/50 rounded-md p-4 font-mono text-xs space-y-1">
+                  <p>z_cf = z + (1/6)(z² - 1)S + (1/24)(z³ - 3z)K - (1/36)(2z³ - 5z)S²</p>
+                  <p className="text-muted-foreground mt-1">where z = normal quantile (e.g., -1.645 for 95%), S = skewness, K = excess kurtosis</p>
+                  <p className="mt-2">Cornish-Fisher VaR = μ + z_cf × σ</p>
+                </div>
+                <p className="text-sm mt-2">
+                  A negative skewness or high kurtosis increases the VaR beyond what normal-distribution VaR would suggest, reflecting the true tail risk more accurately.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Expected Shortfall (CVaR)</h4>
+                <p className="text-sm">
+                  Expected Shortfall measures the average loss in the worst cases beyond the VaR threshold. Two methods are used:
+                </p>
+                <div className="bg-muted/50 rounded-md p-4 font-mono text-xs space-y-2">
+                  <div>
+                    <p className="font-semibold">Parametric ES (Gaussian):</p>
+                    <p>ES(α) = μ - σ × φ(z_α) / α</p>
+                    <p className="text-muted-foreground">where φ is the standard normal PDF, z_α is the normal quantile at level α</p>
+                  </div>
+                  <div>
+                    <p className="font-semibold">Historical ES (Non-parametric):</p>
+                    <p>ES(α) = Mean of returns below the αth percentile</p>
+                    <p className="text-muted-foreground">Uses actual observed returns — no distributional assumptions</p>
+                  </div>
+                </div>
+                <p className="text-sm mt-2">
+                  Parametric ES is a model-based estimate assuming normal returns; Historical ES uses your portfolio's actual worst returns. When these diverge significantly, it indicates the portfolio's return distribution departs meaningfully from normal.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Modified Sharpe Ratio</h4>
+                <p className="text-sm">
+                  The standard Sharpe Ratio penalizes all volatility equally. The Modified Sharpe uses Cornish-Fisher VaR as the risk denominator, which better captures downside risk for portfolios with non-normal returns:
+                </p>
+                <div className="bg-muted/50 rounded-md p-4 font-mono text-xs">
+                  <p>Modified Sharpe = (R - Rf) / |CF-VaR(95%)|</p>
+                  <p className="text-muted-foreground mt-1">where R = portfolio return, Rf = risk-free rate</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Kurtosis-Adjusted Volatility</h4>
+                <p className="text-sm">
+                  Amplifies standard volatility by a factor derived from excess kurtosis. Portfolios with fat tails will show higher adjusted volatility, reflecting the increased probability of extreme moves:
+                </p>
+                <div className="bg-muted/50 rounded-md p-4 font-mono text-xs">
+                  <p>Adjusted Vol = σ × √(1 + Excess Kurtosis / 4)</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Conditional Drawdown at Risk (CDaR 95%)</h4>
+                <p className="text-sm">
+                  CDaR is the drawdown-based analogue of Expected Shortfall. It calculates the average of the worst 5% of drawdowns observed in the performance history, providing a measure of how deep sustained losses tend to be during the most challenging periods:
+                </p>
+                <div className="bg-muted/50 rounded-md p-4 font-mono text-xs">
+                  <p>CDaR(95%) = Mean of drawdowns above the 95th percentile of all observed drawdowns</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Drawdown Duration Analysis</h4>
+                <p className="text-sm">
+                  Tracks how long it takes for the portfolio to recover from peak-to-trough declines. Max Drawdown Duration is the longest period spent below a previous high; Average Drawdown Duration is the typical recovery period. These complement drawdown depth metrics by capturing the time dimension of losses.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-4 border-t pt-4">
+              <h4 className="text-sm font-semibold">Factor Risk Decomposition</h4>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Single-Factor CAPM Model</h4>
+                <p className="text-sm">
+                  Portfolio returns are regressed against benchmark returns using a single-factor model to separate risk into two components:
+                </p>
+                <div className="bg-muted/50 rounded-md p-4 font-mono text-xs space-y-1">
+                  <p>r_portfolio = α + β × r_benchmark + ε</p>
+                  <p className="mt-2">Systematic Risk = β² × Var(r_benchmark)</p>
+                  <p>Idiosyncratic Risk = Var(ε) = Total Variance - Systematic Variance</p>
+                  <p>R-Squared = Systematic Risk / Total Risk</p>
+                </div>
+                <p className="text-sm mt-2">
+                  Systematic risk is the portion explained by broad market movements — it cannot be diversified away. Idiosyncratic risk is portfolio-specific and can be reduced through better diversification. A high R-Squared means the portfolio closely tracks the benchmark; a low R-Squared indicates significant independent risk.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-4 border-t pt-4">
+              <h4 className="text-sm font-semibold">Component Risk Contribution</h4>
+
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Euler Decomposition</h4>
+                <p className="text-sm">
+                  Component risk attribution uses the Euler decomposition theorem to allocate total portfolio risk to individual holdings. Each holding's contribution is proportional to its marginal impact on portfolio variance:
+                </p>
+                <div className="bg-muted/50 rounded-md p-4 font-mono text-xs space-y-1">
+                  <p>Marginal Risk(i) = w(i) × σ(i)² / σ_portfolio</p>
+                  <p>Component Risk(i) = w(i) × Marginal Risk(i)</p>
+                  <p>% Contribution(i) = Component Risk(i) / Σ Component Risk(j)</p>
+                </div>
+                <p className="text-sm mt-2">
+                  Holdings with high percentage contributions are the primary drivers of portfolio risk. A holding with a small weight but high volatility can contribute disproportionately to total risk. This analysis helps identify where risk is concentrated and where diversification might be improved.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-4 border-t pt-4">
+              <h4 className="text-sm font-semibold">Monte Carlo Stress Scenarios (Risk Page)</h4>
+
+              <div className="space-y-2">
+                <p className="text-sm">
+                  The Monte Carlo stress summary on this page uses the same simulation engine as the dedicated Stress Testing page. It generates 200 return paths under 5 stress regimes (Base Case through Black Swan) and reports summary statistics including Expected Return, Probability of Loss, Expected Shortfall, Average Max Drawdown, and percentile distributions. See the Stress Testing page for the full methodology breakdown.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 border-t pt-4">
+              <h4 className="text-sm font-medium text-muted-foreground">References & Inspiration</h4>
+              <ul className="space-y-1.5">
+                {[
+                  "Riskfolio-Lib — Python library for portfolio optimization and risk analysis (Cornish-Fisher VaR, CVaR, risk parity)",
+                  "skfolio — Scikit-learn compatible portfolio optimization library (factor models, risk decomposition)",
+                  "Conditional Drawdown at Risk (CDaR) — Chekhlov, Uryasev, Zabarankin (2005)",
+                  "Euler decomposition for risk budgeting — Meucci (2007), Risk Contributions from Generic User-Defined Factors",
+                  "Cornish-Fisher expansion — Cornish & Fisher (1937), adjustment of cumulants in approximation of distributions",
+                ].map((item, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm">
+                    <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-cyan-500 shrink-0" />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </CardContent>
+        )}
       </Card>
 
       <Card data-testid="card-rolling-alpha">

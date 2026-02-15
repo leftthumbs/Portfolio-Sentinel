@@ -36,6 +36,7 @@ import {
   Legend,
 } from "recharts";
 import type { Portfolio, Holding, RiskMetrics, PerformanceHistory } from "@shared/schema";
+import { detectDataFrequency, formatDateForFrequency, getXAxisTickInterval } from "@/lib/data-frequency";
 
 interface DashboardData {
   portfolio: Portfolio & { isCustom?: boolean };
@@ -73,14 +74,20 @@ function formatDate(date: string | Date): string {
 }
 
 export default function Dashboard() {
-  const { selectedPortfolioId, selectedPortfolioType, selectedPortfolio, selectedTimePeriod } = usePortfolio();
+  const { selectedPortfolioId, selectedPortfolioType, selectedPortfolio, selectedTimePeriod, selectedBenchmarkId, selectedBenchmark } = usePortfolio();
 
-  const dashboardUrl = selectedPortfolioId 
-    ? `/api/dashboard?portfolioId=${selectedPortfolioId}&portfolioType=${selectedPortfolioType}`
-    : "/api/dashboard";
+  const dashboardParams = new URLSearchParams();
+  if (selectedPortfolioId) {
+    dashboardParams.set("portfolioId", selectedPortfolioId);
+    dashboardParams.set("portfolioType", selectedPortfolioType);
+  }
+  if (selectedBenchmarkId) {
+    dashboardParams.set("benchmarkId", selectedBenchmarkId);
+  }
+  const dashboardUrl = `/api/dashboard?${dashboardParams.toString()}`;
 
   const { data, isLoading, error } = useQuery<DashboardData>({
-    queryKey: ["/api/dashboard", selectedPortfolioId, selectedPortfolioType],
+    queryKey: ["/api/dashboard", selectedPortfolioId, selectedPortfolioType, selectedBenchmarkId],
     queryFn: async () => {
       const res = await fetch(dashboardUrl, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch dashboard");
@@ -129,8 +136,10 @@ export default function Dashboard() {
     assetClass: h.assetClass,
   }));
 
+  const dataFrequency = detectDataFrequency(filteredPerformance.map(p => p.date));
+
   const chartData = filteredPerformance.map((p) => ({
-    date: formatDate(p.date),
+    date: formatDateForFrequency(p.date, dataFrequency),
     portfolio: parseFloat(p.portfolioValue),
     benchmark: p.benchmarkValue ? parseFloat(p.benchmarkValue) : null,
   }));
@@ -185,7 +194,7 @@ export default function Dashboard() {
         <Card data-testid="card-performance-chart">
           <CardHeader>
             <CardTitle className="text-base font-medium">Portfolio Performance</CardTitle>
-            <CardDescription>{getTimePeriodLabel(selectedTimePeriod)} portfolio value vs benchmark</CardDescription>
+            <CardDescription>{getTimePeriodLabel(selectedTimePeriod)} portfolio value vs {selectedBenchmark?.name || "benchmark"}</CardDescription>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={300}>
@@ -197,6 +206,7 @@ export default function Dashboard() {
                   fontSize={12}
                   tickLine={false}
                   axisLine={false}
+                  interval={getXAxisTickInterval(chartData.length, dataFrequency)}
                 />
                 <YAxis 
                   stroke="hsl(var(--muted-foreground))" 
@@ -229,7 +239,7 @@ export default function Dashboard() {
                   strokeWidth={1.5}
                   strokeDasharray="4 4"
                   dot={false}
-                  name="Benchmark"
+                  name={selectedBenchmark?.name || "Benchmark"}
                 />
               </LineChart>
             </ResponsiveContainer>

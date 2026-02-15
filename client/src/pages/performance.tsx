@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
 import { AlertTriangle, Info } from "lucide-react";
@@ -20,9 +21,18 @@ import {
   ReferenceLine,
   ComposedChart,
   Bar,
+  Cell,
   Legend,
 } from "recharts";
 import type { Portfolio, PerformanceHistory, Benchmark, BenchmarkReturn } from "@shared/schema";
+import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+import { detectDataFrequency, formatDateForFrequency, formatDateFullForFrequency, getFrequencyLabel, getPeriodLabel, getRecentPeriodCount, getXAxisTickInterval } from "@/lib/data-frequency";
+
+interface SelectedBenchmarkData {
+  benchmark: Benchmark;
+  returns: BenchmarkReturn[];
+}
 
 interface PerformanceData {
   portfolio: Portfolio;
@@ -61,7 +71,21 @@ function formatDateFull(date: string | Date): string {
 }
 
 
+function getStoredBenchmarkIds(portfolioKey: string): string[] {
+  try {
+    const stored = localStorage.getItem(`perf_benchmarks_${portfolioKey}`);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+function setStoredBenchmarkIds(portfolioKey: string, ids: string[]) {
+  localStorage.setItem(`perf_benchmarks_${portfolioKey}`, JSON.stringify(ids));
+}
+
 export default function PerformancePage() {
+  const { toast } = useToast();
   const { selectedPortfolioId, selectedPortfolioType, selectedTimePeriod, selectedBenchmarkId, selectedBenchmark } = usePortfolio();
 
   // Build performance URL with timePeriod for period-aware benchmark calculations
@@ -74,14 +98,23 @@ export default function PerformancePage() {
     if (selectedTimePeriod) {
       params.set("timePeriod", selectedTimePeriod);
     }
+    if (selectedBenchmarkId) {
+      params.set("benchmarkId", selectedBenchmarkId);
+    }
     const qs = params.toString();
     return qs ? `/api/performance?${qs}` : "/api/performance";
   };
 
   const performanceUrl = buildPerformanceUrl();
 
+  const portfolioKey = selectedPortfolioId
+    ? `${selectedPortfolioType}_${selectedPortfolioId}`
+    : "default";
+
+  const [localBenchmarkIds, setLocalBenchmarkIds] = useState<string[]>(() => getStoredBenchmarkIds(portfolioKey));
+
   const { data, isLoading, error, refetch } = useQuery<PerformanceData & { isCustomPortfolio?: boolean }>({
-    queryKey: ["/api/performance", selectedPortfolioId, selectedPortfolioType, selectedTimePeriod],
+    queryKey: ["/api/performance", selectedPortfolioId, selectedPortfolioType, selectedTimePeriod, selectedBenchmarkId],
     queryFn: async () => {
       const res = await fetch(performanceUrl, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch performance data");
@@ -116,6 +149,11 @@ export default function PerformancePage() {
       return res.json();
     },
     enabled: !!benchmarkApiId,
+
+  });
+
+  const { data: compositeBenchmarksData } = useQuery<{ compositeBenchmarks: any[] }>({
+    queryKey: ["/api/composite-benchmarks"],
   });
 
   if (isLoading) {
@@ -235,6 +273,10 @@ export default function PerformancePage() {
     );
   }
 
+  const dataFrequency = detectDataFrequency(performanceHistory.map(p => p.date));
+  const periodLabel = getPeriodLabel(dataFrequency);
+  const frequencyLabel = getFrequencyLabel(dataFrequency);
+
   const firstInPeriod = performanceHistory[0];
   const lastInPeriod = performanceHistory[performanceHistory.length - 1];
 
@@ -261,11 +303,42 @@ export default function PerformancePage() {
     periodWorstDay = Math.min(...dailyReturns);
     periodPositiveDays = dailyReturns.filter(r => r > 0).length;
 
-    const startBenchmarkValue = firstInPeriod.benchmarkValue ? parseFloat(firstInPeriod.benchmarkValue) : startValue;
-    const endBenchmarkValue = lastInPeriod.benchmarkValue ? parseFloat(lastInPeriod.benchmarkValue) : endValue;
-    periodBenchmarkReturn = startBenchmarkValue > 0 ? (endBenchmarkValue - startBenchmarkValue) / startBenchmarkValue : 0;
-    periodAlpha = periodTotalReturn - periodBenchmarkReturn;
+    const gbReturns = globalBenchmarkReturns?.returns || [];
+    if (gbReturns.length > 0) {
+      const sortedBR = [...gbReturns]
+        .filter(r => new Date(r.date) >= startDate)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      if (sortedBR.length >= 2) {
+        const firstBR = sortedBR[0];
+        const lastBR = sortedBR[sortedBR.length - 1];
+        const startCum = firstBR.cumulativeReturn ? parseFloat(firstBR.cumulativeReturn) : 0;
+        const endCum = lastBR.cumulativeReturn ? parseFloat(lastBR.cumulativeReturn) : 0;
+        periodBenchmarkReturn = (1 + endCum) / (1 + startCum) - 1;
+
+        const benchStartDate = new Date(firstBR.date);
+        const benchEndDate = new Date(lastBR.date);
+        const overlapHistory = performanceHistory.filter(p => {
+          const d = new Date(p.date);
+          return d >= benchStartDate && d <= benchEndDate;
+        });
+        if (overlapHistory.length >= 2) {
+          const overlapStartVal = parseFloat(overlapHistory[0].portfolioValue);
+          const overlapEndVal = parseFloat(overlapHistory[overlapHistory.length - 1].portfolioValue);
+          const overlapReturn = overlapStartVal > 0 ? (overlapEndVal - overlapStartVal) / overlapStartVal : 0;
+          periodAlpha = overlapReturn - periodBenchmarkReturn;
+        } else {
+          periodAlpha = periodTotalReturn - periodBenchmarkReturn;
+        }
+      }
+    } else {
+      const startBenchmarkValue = firstInPeriod.benchmarkValue ? parseFloat(firstInPeriod.benchmarkValue) : startValue;
+      const endBenchmarkValue = lastInPeriod.benchmarkValue ? parseFloat(lastInPeriod.benchmarkValue) : endValue;
+      periodBenchmarkReturn = startBenchmarkValue > 0 ? (endBenchmarkValue - startBenchmarkValue) / startBenchmarkValue : 0;
+      periodAlpha = periodTotalReturn - periodBenchmarkReturn;
+    }
   }
+
+  const compositeList = compositeBenchmarksData?.compositeBenchmarks || [];
 
   // Build benchmark return lookup from the globally selected benchmark (sidebar)
   const benchmarkReturns = globalBenchmarkReturns?.returns || [];
@@ -404,8 +477,8 @@ export default function PerformancePage() {
   const returnChart = performanceHistory.map((p) => {
     const dateKey = new Date(p.date).toISOString().split('T')[0];
     const chartPoint: Record<string, any> = {
-      date: formatDate(p.date),
-      fullDate: formatDateFull(p.date),
+      date: formatDateForFrequency(p.date, dataFrequency),
+      fullDate: formatDateFullForFrequency(p.date, dataFrequency),
       portfolio: p.cumulativeReturn ? parseFloat(p.cumulativeReturn) * 100 : 0,
     };
 
@@ -419,8 +492,8 @@ export default function PerformancePage() {
   });
 
   const valueChart = performanceHistory.map((p) => ({
-    date: formatDate(p.date),
-    fullDate: formatDateFull(p.date),
+    date: formatDateForFrequency(p.date, dataFrequency),
+    fullDate: formatDateFullForFrequency(p.date, dataFrequency),
     portfolio: parseFloat(p.portfolioValue),
     benchmark: p.benchmarkValue ? parseFloat(p.benchmarkValue) : null,
   }));
@@ -430,6 +503,14 @@ export default function PerformancePage() {
     date: formatDate(p.date),
     fullDate: formatDateFull(p.date),
     period: p.dailyReturn ? parseFloat(p.dailyReturn) * 100 : 0,
+  }));
+
+  const recentCount = getRecentPeriodCount(dataFrequency);
+  const periodReturnData = performanceHistory.slice(-recentCount);
+  const dailyReturnChart = periodReturnData.map((p) => ({
+    date: formatDateForFrequency(p.date, dataFrequency),
+    fullDate: formatDateFullForFrequency(p.date, dataFrequency),
+    daily: p.dailyReturn ? parseFloat(p.dailyReturn) * 100 : 0,
   }));
 
   return (
@@ -477,6 +558,32 @@ export default function PerformancePage() {
           </AlertDescription>
         </Alert>
       )}
+
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <MetricCard
+          title={`${getTimePeriodLabel(selectedTimePeriod)} Return`}
+          value={formatPercent(periodTotalReturn)}
+          icon={<TrendingUp className="h-5 w-5" />}
+          valueClassName={periodTotalReturn >= 0 ? "text-emerald-500" : "text-red-500"}
+        />
+        <MetricCard
+          title="Annualized Return"
+          value={formatPercent(periodAnnualizedReturn)}
+          icon={<Activity className="h-5 w-5" />}
+          valueClassName={periodAnnualizedReturn >= 0 ? "text-emerald-500" : "text-red-500"}
+        />
+        <MetricCard
+          title="Alpha vs Benchmark"
+          value={formatPercent(periodAlpha)}
+          icon={<Target className="h-5 w-5" />}
+          valueClassName={periodAlpha >= 0 ? "text-emerald-500" : "text-red-500"}
+        />
+        <MetricCard
+          title="Win Rate"
+          value={performanceHistory.length > 0 ? `${((periodPositiveDays / performanceHistory.length) * 100).toFixed(1)}%` : "—"}
+          changeLabel={`${periodPositiveDays}/${performanceHistory.length} ${frequencyLabel.toLowerCase()} periods`}
+        />
+      </div>
 
       <Card data-testid="card-performance-comparison">
         <CardContent className="p-0">
@@ -599,6 +706,7 @@ export default function PerformancePage() {
                     stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
+                    interval={getXAxisTickInterval(returnChart.length, dataFrequency)}
                   />
                   <YAxis 
                     stroke="hsl(var(--muted-foreground))"
@@ -653,6 +761,7 @@ export default function PerformancePage() {
                     stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
+                    interval={getXAxisTickInterval(valueChart.length, dataFrequency)}
                   />
                   <YAxis 
                     stroke="hsl(var(--muted-foreground))"

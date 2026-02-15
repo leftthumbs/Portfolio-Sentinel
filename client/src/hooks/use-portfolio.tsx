@@ -87,23 +87,25 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     queryKey: ["/api/benchmarks"],
   });
 
-  const { data: compositeBenchmarksData } = useQuery<any[]>({
+  const { data: compositeBenchmarksData } = useQuery<{ compositeBenchmarks: any[] }>({
     queryKey: ["/api/composite-benchmarks"],
   });
 
   const portfolios = Array.isArray(portfoliosData?.options) ? portfoliosData.options : [];
   
   const benchmarksList = Array.isArray(benchmarksData?.benchmarks) ? benchmarksData.benchmarks : [];
-  const compositeBenchmarksList = Array.isArray(compositeBenchmarksData) ? compositeBenchmarksData : [];
+  const compositeBenchmarksList = Array.isArray(compositeBenchmarksData?.compositeBenchmarks) 
+    ? compositeBenchmarksData.compositeBenchmarks 
+    : [];
   
   const benchmarks: Benchmark[] = [
     ...benchmarksList,
     ...compositeBenchmarksList.map((cb: any) => ({
-      id: `composite-${cb.id}`,
+      id: cb.id,
       name: cb.name,
       ticker: "CUSTOM",
       category: "Custom",
-      color: "#8b5cf6",
+      color: cb.color || "#8b5cf6",
       isComposite: true,
     })),
   ];

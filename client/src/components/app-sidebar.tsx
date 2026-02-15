@@ -6,7 +6,6 @@ import {
   Shield, 
   AlertTriangle,
   Building2,
-  Upload,
   FolderOpen,
   HardDrive,
   Briefcase,
@@ -17,7 +16,8 @@ import {
   ChevronDown,
   Wallet,
   Target,
-  GitCompare
+  GitCompare,
+  Droplets
 } from "lucide-react";
 import {
   Sidebar,
@@ -73,11 +73,6 @@ const navigationItems = [
     icon: AlertTriangle,
   },
   {
-    title: "Import Data",
-    url: "/import",
-    icon: Upload,
-  },
-  {
     title: "Data Room & Memos",
     url: "/data-room",
     icon: FolderOpen,
@@ -111,6 +106,11 @@ const navigationItems = [
     title: "Analytics Glossary",
     url: "/analytics-glossary",
     icon: BookOpen,
+  },
+  {
+    title: "Interval Funds",
+    url: "/interval-funds",
+    icon: Droplets,
   },
   {
     title: "Custom Benchmarks",
