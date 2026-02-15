@@ -94,7 +94,7 @@ export default function PerformancePage() {
     ? selectedBenchmarkId.replace("composite-", "")
     : selectedBenchmarkId;
 
-  const { data: globalBenchmarkReturns } = useQuery<{ returns: any[]; metrics?: { totalReturn: number; annualizedReturn: number; annualizedVolatility: number; periodCount: number } }>({
+  const { data: globalBenchmarkReturns } = useQuery<{ returns: any[]; cadence?: "daily" | "monthly" | "quarterly"; metrics?: { totalReturn: number; annualizedReturn: number; annualizedVolatility: number; periodCount: number } }>({
     queryKey: [
       isCompositeBenchmark ? "/api/composite-benchmarks" : "/api/benchmarks",
       benchmarkApiId,
@@ -254,14 +254,58 @@ export default function PerformancePage() {
   const benchmarkDisplayName = selectedBenchmark?.name || "Benchmark";
   const benchmarkTicker = selectedBenchmark?.ticker !== "CUSTOM" ? selectedBenchmark?.ticker : null;
 
+  // Detect portfolio data cadence from the actual data point intervals
+  const detectPortfolioCadence = (): "daily" | "monthly" | "quarterly" => {
+    if (performanceHistory.length < 2) return "daily";
+    const intervals: number[] = [];
+    for (let i = 1; i < Math.min(performanceHistory.length, 20); i++) {
+      const diff = new Date(performanceHistory[i].date).getTime() - new Date(performanceHistory[i - 1].date).getTime();
+      intervals.push(diff / (1000 * 60 * 60 * 24));
+    }
+    const avgDays = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    if (avgDays > 60) return "quarterly";
+    if (avgDays > 15) return "monthly";
+    return "daily";
+  };
+
+  const portfolioCadence = detectPortfolioCadence();
+  const benchmarkCadence = globalBenchmarkReturns?.cadence || "daily";
+
+  // Annualization factor depends on cadence
+  const annualizationFactor = (cadence: "daily" | "monthly" | "quarterly") => {
+    switch (cadence) {
+      case "quarterly": return 4;
+      case "monthly": return 12;
+      default: return 252;
+    }
+  };
+
+  // Dynamic labels based on data cadence
+  const cadenceLabel = (cadence: "daily" | "monthly" | "quarterly") => {
+    switch (cadence) {
+      case "quarterly": return { period: "Quarter", periods: "Quarters" };
+      case "monthly": return { period: "Month", periods: "Months" };
+      default: return { period: "Day", periods: "Days" };
+    }
+  };
+
+  const portfolioLabels = cadenceLabel(portfolioCadence);
+  const benchmarkLabels = cadenceLabel(benchmarkCadence);
+
+  // Use the same cadence label when both match, otherwise show each independently
+  const sameCadence = portfolioCadence === benchmarkCadence;
+  const bestLabel = sameCadence ? `Best ${portfolioLabels.period}` : "Best Period";
+  const worstLabel = sameCadence ? `Worst ${portfolioLabels.period}` : "Worst Period";
+  const positiveLabel = sameCadence ? `Positive ${portfolioLabels.periods}` : "Positive Periods";
+
   // Compute benchmark period stats from the fetched returns
   const benchmarkMetrics = globalBenchmarkReturns?.metrics;
   let benchmarkAnnualizedReturn = 0;
-  let benchmarkBestDay = 0;
-  let benchmarkWorstDay = 0;
-  let benchmarkPositiveDays = 0;
+  let benchmarkBestPeriod = 0;
+  let benchmarkWorstPeriod = 0;
+  let benchmarkPositivePeriods = 0;
   let benchmarkVolatility = 0;
-  let benchmarkTotalDays = 0;
+  let benchmarkTotalPeriods = 0;
 
   if (benchmarkMetrics) {
     benchmarkAnnualizedReturn = benchmarkMetrics.annualizedReturn;
@@ -269,29 +313,29 @@ export default function PerformancePage() {
   }
 
   if (sortedBenchmarkReturns.length > 0) {
-    const benchDailyReturns = sortedBenchmarkReturns.map((r: any) =>
+    const benchPeriodReturns = sortedBenchmarkReturns.map((r: any) =>
       parseFloat(r.returnValue || "0")
     );
-    benchmarkBestDay = Math.max(...benchDailyReturns);
-    benchmarkWorstDay = Math.min(...benchDailyReturns);
-    benchmarkPositiveDays = benchDailyReturns.filter((r: number) => r > 0).length;
-    benchmarkTotalDays = benchDailyReturns.length;
+    benchmarkBestPeriod = Math.max(...benchPeriodReturns);
+    benchmarkWorstPeriod = Math.min(...benchPeriodReturns);
+    benchmarkPositivePeriods = benchPeriodReturns.filter((r: number) => r > 0).length;
+    benchmarkTotalPeriods = benchPeriodReturns.length;
 
     // Fallback: compute annualized volatility if not provided by API
-    if (!benchmarkMetrics && benchDailyReturns.length > 1) {
-      const mean = benchDailyReturns.reduce((a: number, b: number) => a + b, 0) / benchDailyReturns.length;
-      const variance = benchDailyReturns.reduce((sum: number, r: number) => sum + Math.pow(r - mean, 2), 0) / (benchDailyReturns.length - 1);
-      benchmarkVolatility = Math.sqrt(variance) * Math.sqrt(252);
+    if (!benchmarkMetrics && benchPeriodReturns.length > 1) {
+      const mean = benchPeriodReturns.reduce((a: number, b: number) => a + b, 0) / benchPeriodReturns.length;
+      const variance = benchPeriodReturns.reduce((sum: number, r: number) => sum + Math.pow(r - mean, 2), 0) / (benchPeriodReturns.length - 1);
+      benchmarkVolatility = Math.sqrt(variance) * Math.sqrt(annualizationFactor(benchmarkCadence));
     }
   }
 
-  // Compute portfolio volatility from daily returns
+  // Compute portfolio volatility from period returns
   let portfolioVolatility = 0;
   if (performanceHistory.length > 1) {
-    const dailyReturnsArr = performanceHistory.map(p => parseFloat(p.dailyReturn || "0"));
-    const mean = dailyReturnsArr.reduce((a, b) => a + b, 0) / dailyReturnsArr.length;
-    const variance = dailyReturnsArr.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (dailyReturnsArr.length - 1);
-    portfolioVolatility = Math.sqrt(variance) * Math.sqrt(252);
+    const periodReturnsArr = performanceHistory.map(p => parseFloat(p.dailyReturn || "0"));
+    const mean = periodReturnsArr.reduce((a, b) => a + b, 0) / periodReturnsArr.length;
+    const variance = periodReturnsArr.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (periodReturnsArr.length - 1);
+    portfolioVolatility = Math.sqrt(variance) * Math.sqrt(annualizationFactor(portfolioCadence));
   }
 
   // Build chart data with portfolio and globally selected benchmark joined by date
@@ -319,10 +363,12 @@ export default function PerformancePage() {
     benchmark: p.benchmarkValue ? parseFloat(p.benchmarkValue) : null,
   }));
 
-  const dailyReturnChart = performanceHistory.slice(-90).map((p) => ({
+  // Show last N periods depending on cadence
+  const periodReturnTailCount = portfolioCadence === "quarterly" ? 20 : portfolioCadence === "monthly" ? 36 : 90;
+  const periodReturnChart = performanceHistory.slice(-periodReturnTailCount).map((p) => ({
     date: formatDate(p.date),
     fullDate: formatDateFull(p.date),
-    daily: p.dailyReturn ? parseFloat(p.dailyReturn) * 100 : 0,
+    period: p.dailyReturn ? parseFloat(p.dailyReturn) * 100 : 0,
   }));
 
   return (
@@ -397,35 +443,44 @@ export default function PerformancePage() {
                 : "—"}
             </div>
 
-            {/* Best Day */}
-            <div className="px-5 py-3 border-b text-muted-foreground">Best Day</div>
+            {/* Best Period */}
+            <div className="px-5 py-3 border-b text-muted-foreground">
+              {bestLabel}
+              {!sameCadence && <span className="text-xs text-muted-foreground/60 ml-1">({portfolioLabels.period} / {benchmarkLabels.period})</span>}
+            </div>
             <div className="px-5 py-3 border-b border-l text-center font-mono font-semibold text-emerald-500">
               +{formatPercent(periodBestDay)}
             </div>
             <div className="px-5 py-3 border-b border-l text-center font-mono text-emerald-500">
-              {benchmarkBestDay !== 0 ? `+${formatPercent(benchmarkBestDay)}` : "—"}
+              {benchmarkBestPeriod !== 0 ? `+${formatPercent(benchmarkBestPeriod)}` : "—"}
             </div>
             <div className="px-5 py-3 border-b border-l text-center font-mono font-medium text-muted-foreground">—</div>
 
-            {/* Worst Day */}
-            <div className="px-5 py-3 border-b text-muted-foreground">Worst Day</div>
+            {/* Worst Period */}
+            <div className="px-5 py-3 border-b text-muted-foreground">
+              {worstLabel}
+              {!sameCadence && <span className="text-xs text-muted-foreground/60 ml-1">({portfolioLabels.period} / {benchmarkLabels.period})</span>}
+            </div>
             <div className="px-5 py-3 border-b border-l text-center font-mono font-semibold text-red-500">
               {formatPercent(periodWorstDay)}
             </div>
             <div className="px-5 py-3 border-b border-l text-center font-mono text-red-500">
-              {benchmarkWorstDay !== 0 ? formatPercent(benchmarkWorstDay) : "—"}
+              {benchmarkWorstPeriod !== 0 ? formatPercent(benchmarkWorstPeriod) : "—"}
             </div>
             <div className="px-5 py-3 border-b border-l text-center font-mono font-medium text-muted-foreground">—</div>
 
-            {/* Win Rate */}
-            <div className="px-5 py-3 text-muted-foreground">Positive Days</div>
+            {/* Positive Periods */}
+            <div className="px-5 py-3 text-muted-foreground">
+              {positiveLabel}
+              {!sameCadence && <span className="text-xs text-muted-foreground/60 ml-1">({portfolioLabels.periods} / {benchmarkLabels.periods})</span>}
+            </div>
             <div className="px-5 py-3 border-l text-center font-mono font-semibold">
               {performanceHistory.length > 0 ? `${((periodPositiveDays / performanceHistory.length) * 100).toFixed(1)}%` : "—"}
               <span className="text-muted-foreground text-xs ml-1">({periodPositiveDays}/{performanceHistory.length})</span>
             </div>
             <div className="px-5 py-3 border-l text-center font-mono">
-              {benchmarkTotalDays > 0 ? `${((benchmarkPositiveDays / benchmarkTotalDays) * 100).toFixed(1)}%` : "—"}
-              {benchmarkTotalDays > 0 && <span className="text-muted-foreground text-xs ml-1">({benchmarkPositiveDays}/{benchmarkTotalDays})</span>}
+              {benchmarkTotalPeriods > 0 ? `${((benchmarkPositivePeriods / benchmarkTotalPeriods) * 100).toFixed(1)}%` : "—"}
+              {benchmarkTotalPeriods > 0 && <span className="text-muted-foreground text-xs ml-1">({benchmarkPositivePeriods}/{benchmarkTotalPeriods})</span>}
             </div>
             <div className="px-5 py-3 border-l text-center font-mono font-medium text-muted-foreground">—</div>
           </div>
@@ -557,14 +612,14 @@ export default function PerformancePage() {
         </CardContent>
       </Card>
 
-      <Card data-testid="card-daily-returns">
+      <Card data-testid="card-period-returns">
         <CardHeader>
-          <CardTitle className="text-base font-medium">Daily Returns</CardTitle>
-          <CardDescription>Last 90 days of daily performance</CardDescription>
+          <CardTitle className="text-base font-medium">{portfolioLabels.period === "Day" ? "Daily" : portfolioLabels.period + "ly"} Returns</CardTitle>
+          <CardDescription>Last {periodReturnTailCount} {portfolioLabels.periods.toLowerCase()} of performance</CardDescription>
         </CardHeader>
         <CardContent>
           <ResponsiveContainer width="100%" height={280}>
-            <ComposedChart data={dailyReturnChart}>
+            <ComposedChart data={periodReturnChart}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
               <XAxis
                 dataKey="date"
@@ -587,11 +642,11 @@ export default function PerformancePage() {
                   fontSize: 12,
                 }}
                 labelFormatter={(label, payload) => payload[0]?.payload?.fullDate || label}
-                formatter={(value: number) => [`${value.toFixed(3)}%`, "Daily Return"]}
+                formatter={(value: number) => [`${value.toFixed(3)}%`, `${portfolioLabels.period} Return`]}
               />
               <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" />
               <Bar
-                dataKey="daily"
+                dataKey="period"
                 fill="hsl(var(--chart-1))"
                 radius={[2, 2, 0, 0]}
               />
