@@ -7,7 +7,7 @@ import {
   AlertTriangle,
   Building2,
   FolderOpen,
-  Mail,
+  HardDrive,
   Briefcase,
   Library,
   BarChart3,
@@ -78,9 +78,9 @@ const navigationItems = [
     icon: FolderOpen,
   },
   {
-    title: "Gmail",
+    title: "Investment Library",
     url: "/gmail",
-    icon: Mail,
+    icon: HardDrive,
   },
   {
     title: "Strategy Library",

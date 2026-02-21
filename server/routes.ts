@@ -11,7 +11,7 @@ import { generateInvestmentMemo, analyzeDocumentContent } from "./memoGenerator"
 import { generateWordDocument, sanitizeFilename } from "./wordGenerator";
 import type { MemoTemplateType } from "@shared/schema";
 import { listOneDriveFiles, getOneDriveFileContent, searchOneDriveFiles } from "./onedrive";
-import { listMessages, getMessage, listLabels, sendEmail, markAsRead, searchMessages } from "./gmail";
+import { listDriveFiles, searchDriveFiles, getDriveFile, downloadDriveFile } from "./gmail";
 import { runBacktest } from "./backtester";
 import { analyzeIntervalFund, compareIntervalFunds, type IntervalFundAnalysisOutput } from "./intervalFundAnalyzer";
 import { validateIntervalFund, generateDataQualityReport } from "./dataValidation";
@@ -22,6 +22,18 @@ import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics 
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns, calculateAdvancedTailMetrics, calculateComponentRisk, calculateFactorDecomposition, runMonteCarloStress, type HoldingInfo } from "./riskCalculations";
 import { refreshBenchmarkReturns, refreshSingleBenchmark, isRealTicker } from "./benchmarkDataService";
+import {
+  processReturnsForPeriod,
+  processCompositeReturns,
+  determineCadence,
+  filterReturnsByTimePeriod,
+  aggregateReturns,
+  calculateMetricsFromAggregated,
+  redemptionFrequencyToCadence,
+  type TimePeriod as BenchmarkTimePeriod,
+  type Cadence,
+  type ReturnDataPoint,
+} from "./benchmarkCalculations";
 import {
   ScenarioEngine,
   holdingsToPortfolioHoldings,
@@ -36,6 +48,19 @@ import {
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
   fs.mkdirSync(MEMOS_DIR, { recursive: true });
+}
+
+function detectPeriodsPerYear(dates: (string | Date)[]): number {
+  if (dates.length < 2) return 12;
+  const sorted = dates.map(d => new Date(d).getTime()).sort((a, b) => a - b);
+  const intervals: number[] = [];
+  for (let i = 1; i < Math.min(sorted.length, 20); i++) {
+    intervals.push((sorted[i] - sorted[i - 1]) / (1000 * 60 * 60 * 24));
+  }
+  const avgDays = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+  if (avgDays > 60) return 4;
+  if (avgDays > 15) return 12;
+  return 252;
 }
 
 const STRATEGY_FILES_DIR = path.join(process.cwd(), "strategy_files");
@@ -472,13 +497,14 @@ export async function registerRoutes(
         );
 
         const dailyReturns = sortedHistory.map(p => parseFloat(p.dailyReturn || "0"));
+        const dashboardPPY = detectPeriodsPerYear(sortedHistory.map(p => p.date));
 
-        // Dynamically calculate risk metrics from daily returns
+        // Dynamically calculate risk metrics from period returns
         let riskMetrics: any = null;
         if (dailyReturns.length >= 10) {
           const avgReturn = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
-          const tradingDays = dailyReturns.length;
-          const years = tradingDays / 252;
+          const totalPeriods = dailyReturns.length;
+          const years = totalPeriods / dashboardPPY;
 
           const firstEntry = sortedHistory[0];
           const lastEntry = sortedHistory[sortedHistory.length - 1];
@@ -488,8 +514,8 @@ export async function registerRoutes(
           const annualizedReturn = years > 0 ? Math.pow(1 + totalReturn, 1 / years) - 1 : 0;
 
           const variance = dailyReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / (dailyReturns.length - 1);
-          const dailyVol = Math.sqrt(variance);
-          const annualVolatility = dailyVol * Math.sqrt(252);
+          const periodVol = Math.sqrt(variance);
+          const annualVolatility = periodVol * Math.sqrt(dashboardPPY);
 
           const sharpeRatio = annualVolatility > 0 ? (annualizedReturn - riskFreeRate) / annualVolatility : 0;
 
@@ -701,9 +727,11 @@ export async function registerRoutes(
       } else {
         // Handle core portfolio performance - dynamically calculate from selected benchmark
         const pid = portfolioId || await getDefaultPortfolioId();
+        const timePeriod = req.query.timePeriod as BenchmarkTimePeriod | undefined;
+        const cadence = req.query.cadence as Cadence | undefined;
         const benchmarkId = req.query.benchmarkId as string;
-        
-        const [portfolio, performanceHistory, portfolioBenchmarks, allBenchmarks] = await Promise.all([
+
+        const [portfolio, performanceHistory, portfolioBenchmarksList, allBenchmarks] = await Promise.all([
           storage.getPortfolio(pid),
           storage.getPerformanceHistory(pid),
           storage.getPortfolioBenchmarks(pid),
@@ -785,16 +813,28 @@ export async function registerRoutes(
         }
 
         // Get benchmark return data for selected benchmarks
+        // Download full time series and process based on time period and cadence
         const selectedBenchmarkData: Array<{
           benchmark: typeof allBenchmarks[0];
-          returns: Awaited<ReturnType<typeof storage.getBenchmarkReturns>>;
+          returns: any[];
+          cadence?: Cadence;
+          metrics?: { totalReturn: number; annualizedReturn: number; annualizedVolatility: number; periodCount: number };
         }> = [];
 
-        for (const pb of portfolioBenchmarks) {
+        for (const pb of portfolioBenchmarksList) {
           const benchmark = allBenchmarks.find(b => b.id === pb.benchmarkId);
           if (benchmark) {
-            const returns = await storage.getBenchmarkReturns(benchmark.id);
-            selectedBenchmarkData.push({ benchmark, returns });
+            const rawReturns = await storage.getBenchmarkReturns(benchmark.id);
+            if (timePeriod) {
+              const result = processReturnsForPeriod(
+                rawReturns.map(r => ({ date: r.date, returnValue: r.returnValue || "0", cumulativeReturn: r.cumulativeReturn })),
+                timePeriod,
+                cadence
+              );
+              selectedBenchmarkData.push({ benchmark, returns: result.returns, cadence: result.cadence, metrics: result.metrics });
+            } else {
+              selectedBenchmarkData.push({ benchmark, returns: rawReturns });
+            }
           }
         }
 
@@ -857,7 +897,12 @@ export async function registerRoutes(
           const mcStats = latestBacktest.monteCarloStats as any;
           const perfData = latestBacktest.performanceData as any[];
           
-          // Extract daily returns for additional calculations
+          // Detect cadence from performance data dates
+          const customPeriodsPerYear = perfData && perfData.length >= 2 
+            ? detectPeriodsPerYear(perfData.map((p: any) => p.date))
+            : 12;
+          
+          // Extract returns for additional calculations
           const dailyReturns = perfData?.map((p: any) => parseFloat(p.dailyReturn) || 0) || [];
           const negativeReturns = dailyReturns.filter(r => r < 0);
           
@@ -866,7 +911,7 @@ export async function registerRoutes(
           const downsideVariance = negativeReturns.length > 0 
             ? negativeReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) / negativeReturns.length 
             : 0;
-          const downsideDeviation = Math.sqrt(downsideVariance) * Math.sqrt(252);
+          const downsideDeviation = Math.sqrt(downsideVariance) * Math.sqrt(customPeriodsPerYear);
           const annualizedReturn = latestBacktest.annualizedReturn ? parseFloat(latestBacktest.annualizedReturn) : 0;
           const sortinoRatio = downsideDeviation > 0 ? (annualizedReturn - riskFreeRate) / downsideDeviation : null;
           
@@ -922,8 +967,8 @@ export async function registerRoutes(
           if (dailyReturns.length >= 10) {
             const sortedReturns = [...dailyReturns].sort((a, b) => a - b);
             const var99Percentile = sortedReturns[Math.floor(dailyReturns.length * 0.01)];
-            // Convert daily VaR to annual and then to dollar amount
-            const var99Annual = var99Percentile * Math.sqrt(252);
+            // Convert period VaR to annual and then to dollar amount
+            const var99Annual = var99Percentile * Math.sqrt(customPeriodsPerYear);
             var99 = String(Math.abs(var99Annual) * currentPortfolioValue);
             
             // CVaR99: average of returns below the 1st percentile
@@ -931,7 +976,7 @@ export async function registerRoutes(
             const tailReturns99 = sortedReturns.filter(r => r <= threshold99);
             if (tailReturns99.length > 0) {
               const avgTailReturn99 = tailReturns99.reduce((sum, r) => sum + r, 0) / tailReturns99.length;
-              const cvar99Annual = avgTailReturn99 * Math.sqrt(252);
+              const cvar99Annual = avgTailReturn99 * Math.sqrt(customPeriodsPerYear);
               cvar99 = String(Math.abs(cvar99Annual) * currentPortfolioValue);
             }
           }
@@ -974,12 +1019,12 @@ export async function registerRoutes(
               benchmarkReturns = benchReturnsRaw.map(r => parseFloat(r.returnValue || "0"));
             }
             const totalBenchReturn = benchmarkReturns.reduce((sum, r) => sum + r, 0);
-            annualizedBenchmarkReturn = benchmarkReturns.length > 0 ? totalBenchReturn * (252 / benchmarkReturns.length) : 0.10;
+            annualizedBenchmarkReturn = benchmarkReturns.length > 0 ? totalBenchReturn * (customPeriodsPerYear / benchmarkReturns.length) : 0.10;
           }
 
-          // If no benchmark returns available, generate synthetic S&P 500-like returns
+          // If no benchmark returns available, generate synthetic benchmark returns
           if (benchmarkReturns.length < 10) {
-            benchmarkReturns = generateSyntheticBenchmarkReturns(dailyReturns.length, 0.10, 0.16);
+            benchmarkReturns = generateSyntheticBenchmarkReturns(dailyReturns.length, 0.10, 0.16, customPeriodsPerYear);
             annualizedBenchmarkReturn = 0.10;
           }
 
@@ -990,6 +1035,7 @@ export async function registerRoutes(
             riskFreeRate,
             annualizedPortfolioReturn: annualizedReturn,
             annualizedBenchmarkReturn,
+            periodsPerYear: customPeriodsPerYear,
           });
 
           // Calculate Ulcer Index (RMS of drawdowns)
@@ -1128,14 +1174,15 @@ export async function registerRoutes(
           new Date(a.date).getTime() - new Date(b.date).getTime()
         );
 
-        const dailyReturns = sortedHistory.map(p => parseFloat(p.dailyReturn || "0"));
+        const periodsPerYear = detectPeriodsPerYear(sortedHistory.map(p => p.date));
+        const periodReturns = sortedHistory.map(p => parseFloat(p.dailyReturn || "0"));
 
         let riskMetrics: any = null;
-        if (dailyReturns.length >= 10) {
-          const negativeReturns = dailyReturns.filter(r => r < 0);
-          const avgReturn = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
-          const tradingDays = dailyReturns.length;
-          const years = tradingDays / 252;
+        if (periodReturns.length >= 10) {
+          const negativeReturns = periodReturns.filter(r => r < 0);
+          const avgReturn = periodReturns.reduce((a, b) => a + b, 0) / periodReturns.length;
+          const totalPeriods = periodReturns.length;
+          const years = totalPeriods / periodsPerYear;
 
           const firstEntry = sortedHistory[0];
           const lastEntry = sortedHistory[sortedHistory.length - 1];
@@ -1144,16 +1191,16 @@ export async function registerRoutes(
           const totalReturn = startValue > 0 ? (endValue - startValue) / startValue : 0;
           const annualizedReturn = years > 0 ? Math.pow(1 + totalReturn, 1 / years) - 1 : 0;
 
-          const variance = dailyReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / (dailyReturns.length - 1);
-          const dailyVol = Math.sqrt(variance);
-          const annualVolatility = dailyVol * Math.sqrt(252);
+          const variance = periodReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / (periodReturns.length - 1);
+          const periodVol = Math.sqrt(variance);
+          const annualVolatility = periodVol * Math.sqrt(periodsPerYear);
 
           const sharpeRatio = annualVolatility > 0 ? (annualizedReturn - riskFreeRate) / annualVolatility : 0;
 
           const downsideVariance = negativeReturns.length > 0
             ? negativeReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) / negativeReturns.length
             : 0;
-          const downsideDeviation = Math.sqrt(downsideVariance) * Math.sqrt(252);
+          const downsideDeviation = Math.sqrt(downsideVariance) * Math.sqrt(periodsPerYear);
           const sortinoRatio = downsideDeviation > 0 ? (annualizedReturn - riskFreeRate) / downsideDeviation : null;
 
           let peakValue = startValue;
@@ -1169,26 +1216,26 @@ export async function registerRoutes(
 
           let skewness = null;
           let kurtosis = null;
-          if (dailyReturns.length > 3) {
-            const n = dailyReturns.length;
-            const stdDev = Math.sqrt(dailyReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / n);
+          if (periodReturns.length > 3) {
+            const n = periodReturns.length;
+            const stdDev = Math.sqrt(periodReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / n);
             if (stdDev > 0) {
-              skewness = dailyReturns.reduce((sum, r) => sum + Math.pow((r - avgReturn) / stdDev, 3), 0) / n;
-              kurtosis = dailyReturns.reduce((sum, r) => sum + Math.pow((r - avgReturn) / stdDev, 4), 0) / n - 3;
+              skewness = periodReturns.reduce((sum, r) => sum + Math.pow((r - avgReturn) / stdDev, 3), 0) / n;
+              kurtosis = periodReturns.reduce((sum, r) => sum + Math.pow((r - avgReturn) / stdDev, 4), 0) / n - 3;
             }
           }
 
-          const gains = dailyReturns.filter(r => r > 0).reduce((a, b) => a + b, 0);
-          const pains = Math.abs(dailyReturns.filter(r => r < 0).reduce((a, b) => a + b, 0));
+          const gains = periodReturns.filter(r => r > 0).reduce((a, b) => a + b, 0);
+          const pains = Math.abs(periodReturns.filter(r => r < 0).reduce((a, b) => a + b, 0));
           const gainToPainRatio = pains > 0 ? gains / pains : null;
 
-          const gainsAboveThreshold = dailyReturns.filter(r => r > 0).reduce((a, b) => a + b, 0);
-          const lossesBelowThreshold = Math.abs(dailyReturns.filter(r => r < 0).reduce((a, b) => a + b, 0));
+          const gainsAboveThreshold = periodReturns.filter(r => r > 0).reduce((a, b) => a + b, 0);
+          const lossesBelowThreshold = Math.abs(periodReturns.filter(r => r < 0).reduce((a, b) => a + b, 0));
           const omegaRatio = lossesBelowThreshold > 0 ? gainsAboveThreshold / lossesBelowThreshold : null;
 
-          const sortedReturns = [...dailyReturns].sort((a, b) => a - b);
-          const var95Pct = sortedReturns[Math.floor(dailyReturns.length * 0.05)];
-          const var99Pct = sortedReturns[Math.floor(dailyReturns.length * 0.01)];
+          const sortedReturns = [...periodReturns].sort((a, b) => a - b);
+          const var95Pct = sortedReturns[Math.floor(periodReturns.length * 0.05)];
+          const var99Pct = sortedReturns[Math.floor(periodReturns.length * 0.01)];
           const var95 = var95Pct != null ? String(var95Pct) : null;
           const var99 = var99Pct != null ? String(var99Pct) : null;
 
@@ -1256,20 +1303,21 @@ export async function registerRoutes(
               return benchReturnsByDate.get(dateKey) || 0;
             });
             const totalBenchReturn = benchmarkReturns.reduce((sum, r) => sum + r, 0);
-            annualizedBenchmarkReturn = totalBenchReturn * (252 / benchmarkReturns.length);
+            annualizedBenchmarkReturn = totalBenchReturn * (periodsPerYear / benchmarkReturns.length);
           }
 
           if (benchmarkReturns.length < 10) {
-            benchmarkReturns = generateSyntheticBenchmarkReturns(dailyReturns.length, 0.10, 0.16);
+            benchmarkReturns = generateSyntheticBenchmarkReturns(periodReturns.length, 0.10, 0.16, periodsPerYear);
             annualizedBenchmarkReturn = 0.10;
           }
 
           const benchmarkMetrics = calculateBenchmarkMetrics({
-            portfolioReturns: dailyReturns,
+            portfolioReturns: periodReturns,
             benchmarkReturns,
             riskFreeRate,
             annualizedPortfolioReturn: annualizedReturn,
             annualizedBenchmarkReturn,
+            periodsPerYear,
           });
 
           riskMetrics = {
@@ -1331,14 +1379,15 @@ export async function registerRoutes(
 
       let riskFreeRate = 0.05;
       try {
-        const tbillRate = await get3MonthTBillRate();
-        riskFreeRate = tbillRate;
+        const tbillData = await get3MonthTBillRate();
+        riskFreeRate = tbillData.rate;
       } catch (e) {}
 
-      let dailyReturns: number[] = [];
+      let periodReturns: number[] = [];
       let portfolioValues: number[] = [];
       let holdingInfos: HoldingInfo[] = [];
       let benchmarkReturns: number[] = [];
+      let advPeriodsPerYear = 12;
 
       if (portfolioType === "custom" && portfolioId) {
         const customPortfolio = await storage.getCustomPortfolio(portfolioId);
@@ -1354,8 +1403,14 @@ export async function registerRoutes(
           portfolioValues = curve;
           for (let i = 1; i < curve.length; i++) {
             if (curve[i - 1] > 0) {
-              dailyReturns.push((curve[i] - curve[i - 1]) / curve[i - 1]);
+              periodReturns.push((curve[i] - curve[i - 1]) / curve[i - 1]);
             }
+          }
+        }
+        if (latestBacktest?.performanceData && Array.isArray(latestBacktest.performanceData)) {
+          const perfDates = (latestBacktest.performanceData as any[]).map((p: any) => p.date).filter(Boolean);
+          if (perfDates.length >= 2) {
+            advPeriodsPerYear = detectPeriodsPerYear(perfDates);
           }
         }
 
@@ -1374,8 +1429,9 @@ export async function registerRoutes(
           const sorted = performanceHistory.sort((a, b) =>
             new Date(a.date).getTime() - new Date(b.date).getTime()
           );
-          dailyReturns = sorted.map(p => parseFloat(p.dailyReturn || "0"));
+          periodReturns = sorted.map(p => parseFloat(p.dailyReturn || "0"));
           portfolioValues = sorted.map(p => parseFloat(p.portfolioValue));
+          advPeriodsPerYear = detectPeriodsPerYear(sorted.map(p => p.date));
         }
 
         const holdings = await storage.getHoldings(pid || "");
@@ -1392,12 +1448,12 @@ export async function registerRoutes(
         benchmarkReturns = benchReturnsRaw.map(br => parseFloat(br.returnValue || "0"));
       }
       if (benchmarkReturns.length < 10) {
-        benchmarkReturns = generateSyntheticBenchmarkReturns(dailyReturns.length, 0.10, 0.16);
+        benchmarkReturns = generateSyntheticBenchmarkReturns(periodReturns.length, 0.10, 0.16, advPeriodsPerYear);
       }
 
-      const advancedTail = calculateAdvancedTailMetrics(dailyReturns, portfolioValues, riskFreeRate);
-      const componentRisk = calculateComponentRisk(holdingInfos, dailyReturns);
-      const factorDecomp = calculateFactorDecomposition(dailyReturns, benchmarkReturns);
+      const advancedTail = calculateAdvancedTailMetrics(periodReturns, portfolioValues, riskFreeRate, advPeriodsPerYear);
+      const componentRisk = calculateComponentRisk(holdingInfos, periodReturns, advPeriodsPerYear);
+      const factorDecomp = calculateFactorDecomposition(periodReturns, benchmarkReturns, advPeriodsPerYear);
 
       const stressScenarios = [
         { name: "Baseline (No Stress)", meanShift: 0, volMultiplier: 1.0 },
@@ -1406,8 +1462,8 @@ export async function registerRoutes(
         { name: "Severe Stress (Vol 3x)", meanShift: -0.15, volMultiplier: 3.0 },
       ];
 
-      const monteCarloResults = dailyReturns.length >= 20
-        ? stressScenarios.map(scenario => runMonteCarloStress(dailyReturns, scenario, 200, 252))
+      const monteCarloResults = periodReturns.length >= 20
+        ? stressScenarios.map(scenario => runMonteCarloStress(periodReturns, scenario, 200, advPeriodsPerYear, advPeriodsPerYear))
         : [];
 
       res.json({
@@ -1879,6 +1935,7 @@ export async function registerRoutes(
 
       let dailyReturns: number[] = [];
 
+      let mcPeriodsPerYear = 12;
       if (portfolioType === "custom" && portfolioId) {
         const backtests = await storage.getBacktestResults(portfolioId);
         const latestBacktest = backtests.length > 0 ? backtests[0] : null;
@@ -1892,6 +1949,10 @@ export async function registerRoutes(
             }
           }
         }
+        if (latestBacktest?.performanceData && Array.isArray(latestBacktest.performanceData)) {
+          const perfDates = (latestBacktest.performanceData as any[]).map((p: any) => p.date).filter(Boolean);
+          if (perfDates.length >= 2) mcPeriodsPerYear = detectPeriodsPerYear(perfDates);
+        }
       } else {
         const pid = portfolioId || await getDefaultPortfolioId();
         const performanceHistory = await storage.getPerformanceHistory(pid);
@@ -1900,6 +1961,7 @@ export async function registerRoutes(
             new Date(a.date).getTime() - new Date(b.date).getTime()
           );
           dailyReturns = sorted.map(p => parseFloat(p.dailyReturn || "0"));
+          mcPeriodsPerYear = detectPeriodsPerYear(sorted.map(p => p.date));
         }
       }
 
@@ -1916,7 +1978,7 @@ export async function registerRoutes(
       ];
 
       const results = defaultScenarios.map((scenario: any) =>
-        runMonteCarloStress(dailyReturns, scenario, 200, 252)
+        runMonteCarloStress(dailyReturns, scenario, 200, mcPeriodsPerYear, mcPeriodsPerYear)
       );
 
       res.json({ results });
@@ -2351,85 +2413,53 @@ export async function registerRoutes(
     }
   });
 
-  // Gmail routes
-  app.get("/api/gmail/messages", async (req, res) => {
+  // Investment Library (Google Drive) routes
+  app.get("/api/drive/files", async (req, res) => {
     try {
-      const query = req.query.q as string | undefined;
-      const maxResults = parseInt(req.query.maxResults as string) || 20;
-      const messages = await listMessages(query, maxResults);
-      res.json({ messages });
+      const folderId = req.query.folderId as string | undefined;
+      const files = await listDriveFiles(folderId);
+      res.json({ files });
     } catch (error: any) {
-      console.error("Gmail list messages error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch emails" });
+      console.error("Drive list files error:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch files" });
     }
   });
 
-  app.get("/api/gmail/messages/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const result = await getMessage(id);
-      res.json(result);
-    } catch (error: any) {
-      console.error("Gmail get message error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch email" });
-    }
-  });
-
-  app.get("/api/gmail/labels", async (req, res) => {
-    try {
-      const labels = await listLabels();
-      res.json({ labels });
-    } catch (error: any) {
-      console.error("Gmail list labels error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch labels" });
-    }
-  });
-
-  app.post("/api/gmail/messages/:id/read", async (req, res) => {
+  app.get("/api/drive/files/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      await markAsRead(id);
-      res.json({ success: true });
+      const file = await getDriveFile(id);
+      res.json(file);
     } catch (error: any) {
-      console.error("Gmail mark as read error:", error);
-      res.status(500).json({ message: error.message || "Failed to mark as read" });
+      console.error("Drive get file error:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch file" });
     }
   });
 
-  const sendEmailSchema = z.object({
-    to: z.string().email("Invalid email address"),
-    subject: z.string().min(1, "Subject is required"),
-    body: z.string().min(1, "Message body is required"),
-  });
-
-  app.post("/api/gmail/send", async (req, res) => {
+  app.get("/api/drive/files/:id/download", async (req, res) => {
     try {
-      const parsed = sendEmailSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ message: parsed.error.errors[0].message });
-      }
-
-      const { to, subject, body } = parsed.data;
-      const messageId = await sendEmail(to, subject, body);
-      res.status(201).json({ messageId });
+      const { id } = req.params;
+      const result = await downloadDriveFile(id);
+      res.setHeader("Content-Type", result.mimeType);
+      res.setHeader("Content-Disposition", `attachment; filename="${result.name}"`);
+      result.stream.pipe(res);
     } catch (error: any) {
-      console.error("Gmail send error:", error);
-      res.status(500).json({ message: error.message || "Failed to send email" });
+      console.error("Drive download error:", error);
+      res.status(500).json({ message: error.message || "Failed to download file" });
     }
   });
 
-  app.get("/api/gmail/search", async (req, res) => {
+  app.get("/api/drive/search", async (req, res) => {
     try {
       const query = req.query.q as string;
       if (!query) {
         return res.status(400).json({ message: "Search query is required" });
       }
-      const maxResults = parseInt(req.query.maxResults as string) || 20;
-      const messages = await searchMessages(query, maxResults);
-      res.json({ messages });
+      const files = await searchDriveFiles(query);
+      res.json({ files });
     } catch (error: any) {
-      console.error("Gmail search error:", error);
-      res.status(500).json({ message: error.message || "Failed to search emails" });
+      console.error("Drive search error:", error);
+      res.status(500).json({ message: error.message || "Failed to search files" });
     }
   });
 
@@ -3722,7 +3752,10 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
           const downsideVariance = negativeReturns.length > 0 
             ? negativeReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) / negativeReturns.length 
             : 0;
-          const downsideDeviation = Math.sqrt(downsideVariance) * Math.sqrt(252);
+          const dashPeriodsPerYear = alignedData.length >= 2
+            ? detectPeriodsPerYear(alignedData.map(d => d.date))
+            : 12;
+          const downsideDeviation = Math.sqrt(downsideVariance) * Math.sqrt(dashPeriodsPerYear);
           const sortinoRatio = downsideDeviation > 0 ? (annualizedReturn - riskFreeRate) / downsideDeviation : null;
           
           const maxDrawdown = latestBacktest.maxDrawdown ? Math.abs(parseFloat(latestBacktest.maxDrawdown)) : 0;
@@ -3733,13 +3766,14 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
           let alpha = null;
           
           if (dailyReturns.length >= 10 && benchmarkReturns.length >= 10) {
-            const annualizedBenchReturn = benchmarkReturns.reduce((a, b) => a + b, 0) * (252 / benchmarkReturns.length);
+            const annualizedBenchReturn = benchmarkReturns.reduce((a, b) => a + b, 0) * (dashPeriodsPerYear / benchmarkReturns.length);
             const benchmarkMetrics = calculateBenchmarkMetrics({
               portfolioReturns: dailyReturns,
               benchmarkReturns: benchmarkReturns,
               riskFreeRate,
               annualizedPortfolioReturn: annualizedReturn,
               annualizedBenchmarkReturn: annualizedBenchReturn,
+              periodsPerYear: dashPeriodsPerYear,
             });
             beta = benchmarkMetrics.beta;
             alpha = benchmarkMetrics.alpha;
@@ -4301,6 +4335,8 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
   app.get("/api/benchmarks/:id/returns", async (req, res) => {
     try {
       const { id } = req.params;
+      const timePeriodParam = req.query.timePeriod as BenchmarkTimePeriod | undefined;
+      const cadenceParam = req.query.cadence as Cadence | undefined;
       const benchmark = await storage.getBenchmark(id);
       const apiKey = process.env.ALPHA_VANTAGE_API_KEY || "";
 
@@ -4312,7 +4348,16 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
       }
 
       const returns = await storage.getBenchmarkReturns(id);
-      res.json({ returns });
+      if (timePeriodParam) {
+        const result = processReturnsForPeriod(
+          returns.map(r => ({ date: r.date, returnValue: r.returnValue || "0", cumulativeReturn: r.cumulativeReturn })),
+          timePeriodParam,
+          cadenceParam
+        );
+        res.json({ returns: result.returns, cadence: result.cadence, timePeriod: timePeriodParam, metrics: result.metrics });
+      } else {
+        res.json({ returns });
+      }
     } catch (error: any) {
       console.error("Get benchmark returns error:", error);
       res.status(500).json({ message: "Failed to fetch benchmark returns" });
@@ -4451,6 +4496,8 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
   app.get("/api/composite-benchmarks/:id/returns", async (req, res) => {
     try {
       const { id } = req.params;
+      const timePeriodParam = req.query.timePeriod as BenchmarkTimePeriod | undefined;
+      const cadenceParam = req.query.cadence as Cadence | undefined;
       const composite = await storage.getCompositeBenchmark(id);
       if (!composite) {
         return res.status(404).json({ message: "Composite benchmark not found" });
@@ -4477,19 +4524,28 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
         });
       });
       
-      let cumulativeReturn = 0;
+      let cumulativeReturnVal = 0;
       const compositeReturns = Array.from(dateMap.entries())
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([date, returnValue]) => {
-          cumulativeReturn = (1 + cumulativeReturn) * (1 + returnValue) - 1;
+          cumulativeReturnVal = (1 + cumulativeReturnVal) * (1 + returnValue) - 1;
           return {
             date: new Date(date),
             returnValue: String(returnValue),
-            cumulativeReturn: String(cumulativeReturn),
+            cumulativeReturn: String(cumulativeReturnVal),
           };
         });
       
-      res.json({ returns: compositeReturns });
+      if (timePeriodParam) {
+        const result = processReturnsForPeriod(
+          compositeReturns.map(r => ({ date: r.date, returnValue: r.returnValue, cumulativeReturn: r.cumulativeReturn })),
+          timePeriodParam,
+          cadenceParam
+        );
+        res.json({ returns: result.returns, cadence: result.cadence, timePeriod: timePeriodParam, metrics: result.metrics });
+      } else {
+        res.json({ returns: compositeReturns });
+      }
     } catch (error: any) {
       console.error("Get composite benchmark returns error:", error);
       res.status(500).json({ message: "Failed to fetch composite benchmark returns" });

@@ -4,20 +4,14 @@ import { usePortfolio } from "@/hooks/use-portfolio";
 import { getTimePeriodStartDate, getTimePeriodLabel, TimePeriod } from "@/components/time-period-selector";
 import { useAllBenchmarks } from "@/hooks/use-all-benchmarks";
 import { detectDataFrequency, formatDateForFrequency, getFrequencyLabel, getXAxisTickInterval } from "@/lib/data-frequency";
-import { AlertTriangle, Shield, Activity, TrendingDown, BarChart3, Scale, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, Shield, Activity, TrendingDown, BarChart3, Info, Scale, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { MetricCard } from "@/components/metric-card";
 import { ChartSkeleton, MetricCardSkeleton } from "@/components/loading-skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   AreaChart,
   Area,
@@ -99,14 +93,16 @@ interface PortfolioOptionsData {
 }
 
 export default function RiskPage() {
-  const { selectedPortfolioId, selectedPortfolioType, selectedPortfolio, selectedBenchmarkId: globalBenchmarkId, selectedTimePeriod } = usePortfolio();
-  const [localBenchmarkId, setLocalBenchmarkId] = useState<string>("");
+  const { selectedPortfolioId, selectedPortfolioType, selectedPortfolio, selectedBenchmarkId: globalBenchmarkId, selectedBenchmark, selectedTimePeriod } = usePortfolio();
   const [advancedMethodologyExpanded, setAdvancedMethodologyExpanded] = useState(false);
-  const [selectedBenchmarkType, setSelectedBenchmarkType] = useState<"standard" | "composite">("standard");
   const { allBenchmarks: allBenchmarksList, isLoading: isLoadingBenchmarks } = useAllBenchmarks();
 
-  const selectedBenchmarkId = localBenchmarkId || globalBenchmarkId;
-  const setSelectedBenchmarkId = setLocalBenchmarkId;
+  // Use the global benchmark from sidebar - determine type and API ID
+  const isCompositeBenchmark = selectedBenchmark?.isComposite === true;
+  const selectedBenchmarkId = globalBenchmarkId;
+  const benchmarkApiId = isCompositeBenchmark && selectedBenchmarkId?.startsWith("composite-")
+    ? selectedBenchmarkId.replace("composite-", "")
+    : selectedBenchmarkId;
 
   const riskParams = new URLSearchParams();
   if (selectedPortfolioId) {
@@ -128,19 +124,21 @@ export default function RiskPage() {
   });
 
   const { data: benchmarkReturnsData } = useQuery<BenchmarkReturnsData>({
-    queryKey: selectedBenchmarkType === "composite" 
-      ? ["/api/composite-benchmarks", selectedBenchmarkId, "returns"]
-      : ["/api/benchmarks", selectedBenchmarkId, "returns"],
+    queryKey: [
+      isCompositeBenchmark ? "/api/composite-benchmarks" : "/api/benchmarks",
+      benchmarkApiId,
+      "returns",
+    ],
     queryFn: async () => {
-      if (!selectedBenchmarkId) return { returns: [] };
-      const endpoint = selectedBenchmarkType === "composite"
-        ? `/api/composite-benchmarks/${selectedBenchmarkId}/returns`
-        : `/api/benchmarks/${selectedBenchmarkId}/returns`;
+      if (!benchmarkApiId) return { returns: [] };
+      const endpoint = isCompositeBenchmark
+        ? `/api/composite-benchmarks/${benchmarkApiId}/returns`
+        : `/api/benchmarks/${benchmarkApiId}/returns`;
       const res = await fetch(endpoint, { credentials: "include" });
       if (!res.ok) return { returns: [] };
       return res.json();
     },
-    enabled: !!selectedBenchmarkId,
+    enabled: !!benchmarkApiId,
   });
 
   const advancedRiskParams = new URLSearchParams();
@@ -240,7 +238,75 @@ export default function RiskPage() {
   const performanceHistory = rawPerformanceHistory.filter(
     (p) => new Date(p.date) >= startDate
   );
-  
+
+  // Detect whether the selected time period is fully covered by available data
+  const earliestDataDate = rawPerformanceHistory.length > 0
+    ? new Date(rawPerformanceHistory[0].date)
+    : null;
+  const portfolioDataGap = earliestDataDate && earliestDataDate > startDate;
+  const portfolioHasNoData = performanceHistory.length === 0;
+  const portfolioHasPartialData = !portfolioHasNoData && portfolioDataGap && selectedTimePeriod !== "SI";
+  const benchmarkHasNoData = (benchmarkReturnsData?.returns?.length ?? 0) === 0 && !!benchmarkApiId;
+
+  // If data exists but nothing falls within the selected time period
+  if (portfolioHasNoData && rawPerformanceHistory.length > 0) {
+    const dataStart = new Date(rawPerformanceHistory[0].date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    const dataEnd = new Date(rawPerformanceHistory[rawPerformanceHistory.length - 1].date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-risk-title">Risk Analytics</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {selectedPortfolio?.name || portfolio.name} • {getTimePeriodLabel(selectedTimePeriod)}
+          </p>
+        </div>
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Historical data not available for this period</AlertTitle>
+          <AlertDescription>
+            No portfolio data exists for the selected <strong>{getTimePeriodLabel(selectedTimePeriod)}</strong> time period.
+            Available data ranges from <strong>{dataStart}</strong> to <strong>{dataEnd}</strong>.
+            Try selecting a shorter time period or <strong>Since Inception (SI)</strong> to view all available data.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  // Detect portfolio data cadence from data point intervals
+  const detectPortfolioCadence = (): "daily" | "monthly" | "quarterly" => {
+    if (performanceHistory.length < 2) return "daily";
+    const intervals: number[] = [];
+    for (let i = 1; i < Math.min(performanceHistory.length, 20); i++) {
+      const diff = new Date(performanceHistory[i].date).getTime() - new Date(performanceHistory[i - 1].date).getTime();
+      intervals.push(diff / (1000 * 60 * 60 * 24));
+    }
+    const avgDays = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    if (avgDays > 60) return "quarterly";
+    if (avgDays > 15) return "monthly";
+    return "daily";
+  };
+
+  const portfolioCadence = detectPortfolioCadence();
+
+  const cadenceLabel = (cadence: "daily" | "monthly" | "quarterly") => {
+    switch (cadence) {
+      case "quarterly": return { period: "Quarter", periods: "Quarters", singular: "quarterly" };
+      case "monthly": return { period: "Month", periods: "Months", singular: "monthly" };
+      default: return { period: "Day", periods: "Days", singular: "daily" };
+    }
+  };
+
+  const periodsPerYear = (cadence: "daily" | "monthly" | "quarterly") => {
+    switch (cadence) {
+      case "quarterly": return 4;
+      case "monthly": return 12;
+      default: return 252;
+    }
+  };
+
+  const portfolioCadenceLabels = cadenceLabel(portfolioCadence);
+
   const volatility = riskMetrics?.volatility ? parseFloat(riskMetrics.volatility) : 0;
   const sharpe = riskMetrics?.sharpeRatio ? parseFloat(riskMetrics.sharpeRatio) : 0;
   const sortino = riskMetrics?.sortinoRatio ? parseFloat(riskMetrics.sortinoRatio) : 0;
@@ -293,11 +359,14 @@ export default function RiskPage() {
     };
   });
 
+  // Use cadence-aware bucket widths: daily=0.5%, monthly=2%, quarterly=5%
+  const bucketWidth = portfolioCadence === "quarterly" ? 5 : portfolioCadence === "monthly" ? 2 : 0.5;
+  const bucketPrecision = portfolioCadence === "quarterly" ? 0 : portfolioCadence === "monthly" ? 0 : 1;
   const returnDistribution = performanceHistory.reduce((acc, p) => {
     if (p.dailyReturn) {
       const ret = parseFloat(p.dailyReturn) * 100;
-      const bucket = Math.round(ret * 2) / 2;
-      const bucketKey = bucket.toFixed(1);
+      const bucket = Math.round(ret / bucketWidth) * bucketWidth;
+      const bucketKey = bucket.toFixed(bucketPrecision);
       acc[bucketKey] = (acc[bucketKey] || 0) + 1;
     }
     return acc;
@@ -366,22 +435,9 @@ export default function RiskPage() {
     { label: "CAGR", value: formatPercent(cagr), description: "Compound annual growth rate" },
   ];
 
-  // Calculate rolling alpha based on selected benchmark
+  // Calculate rolling alpha based on globally selected benchmark (sidebar)
   const benchmarkReturns = benchmarkReturnsData?.returns || [];
-  
-  // Group benchmarks by category
-  const benchmarksByCategory: Record<string, typeof allBenchmarksList> = {};
-  allBenchmarksList.forEach((b) => {
-    const category = b.category || "Other";
-    if (!benchmarksByCategory[category]) benchmarksByCategory[category] = [];
-    benchmarksByCategory[category].push(b);
-  });
-
-  const handleBenchmarkChange = (value: string) => {
-    const [type, id] = value.split(":");
-    setSelectedBenchmarkId(id);
-    setSelectedBenchmarkType(type as "standard" | "composite");
-  };
+  const benchmarkDisplayName = selectedBenchmark?.name || "Benchmark";
   
   // Build benchmark return lookup by date
   const benchmarkReturnsByDate = new Map<string, number>();
@@ -392,49 +448,53 @@ export default function RiskPage() {
     }
   });
 
-  // Calculate rolling alpha for 1-year (252 trading days) and 3-year (756 trading days)
-  // Uses compounded returns: (1+r1)*(1+r2)*...*(1+rn) - 1
-  const calculateRollingAlpha = (windowDays: number) => {
-    const sortedHistory = [...performanceHistory].sort((a, b) => 
+  // Calculate rolling alpha using cadence-aware window sizes
+  // Daily: 252/756 periods, Monthly: 12/36 periods, Quarterly: 4/12 periods
+  const ppYear = periodsPerYear(portfolioCadence);
+  const windowSize1Y = ppYear; // 1-year window in periods
+  const windowSize3Y = ppYear * 3; // 3-year window in periods
+
+  const calculateRollingAlpha = (windowPeriods: number) => {
+    const sortedHistory = [...performanceHistory].sort((a, b) =>
       new Date(a.date).getTime() - new Date(b.date).getTime()
     );
-    
+
     const result: { date: string; alpha: number; portfolioReturn: number; benchmarkReturn: number }[] = [];
-    
-    for (let i = windowDays - 1; i < sortedHistory.length; i++) {
-      const windowData = sortedHistory.slice(i - windowDays + 1, i + 1);
-      
+
+    for (let i = windowPeriods - 1; i < sortedHistory.length; i++) {
+      const windowData = sortedHistory.slice(i - windowPeriods + 1, i + 1);
+
       let portfolioCompounded = 1;
       let benchmarkCompounded = 1;
-      let matchedDays = 0;
-      
+      let matchedPeriods = 0;
+
       windowData.forEach(p => {
         const dateKey = new Date(p.date).toISOString().split('T')[0];
         const portfolioRet = p.dailyReturn ? parseFloat(p.dailyReturn) : 0;
-        
-        // Only include days where we have benchmark data
+
+        // Only include periods where we have benchmark data
         if (benchmarkReturnsByDate.has(dateKey)) {
           const benchRet = benchmarkReturnsByDate.get(dateKey) || 0;
           portfolioCompounded *= (1 + portfolioRet);
           benchmarkCompounded *= (1 + benchRet);
-          matchedDays++;
+          matchedPeriods++;
         }
       });
-      
-      // Skip if insufficient matched days (need at least 80% coverage)
-      const minRequiredDays = Math.floor(windowDays * 0.8);
-      if (matchedDays < minRequiredDays) continue;
-      
+
+      // Skip if insufficient matched periods (need at least 80% coverage)
+      const minRequired = Math.floor(windowPeriods * 0.8);
+      if (matchedPeriods < minRequired) continue;
+
       // Calculate cumulative returns over the window
       const portfolioCumReturn = portfolioCompounded - 1;
       const benchmarkCumReturn = benchmarkCompounded - 1;
-      
-      // Annualize using geometric annualization
-      const annualizationFactor = 252 / matchedDays;
-      const annualizedPortfolioReturn = Math.pow(1 + portfolioCumReturn, annualizationFactor) - 1;
-      const annualizedBenchmarkReturn = Math.pow(1 + benchmarkCumReturn, annualizationFactor) - 1;
+
+      // Annualize using geometric annualization based on actual cadence
+      const annFactor = ppYear / matchedPeriods;
+      const annualizedPortfolioReturn = Math.pow(1 + portfolioCumReturn, annFactor) - 1;
+      const annualizedBenchmarkReturn = Math.pow(1 + benchmarkCumReturn, annFactor) - 1;
       const rollingAlpha = annualizedPortfolioReturn - annualizedBenchmarkReturn;
-      
+
       result.push({
         date: formatDateForFrequency(sortedHistory[i].date, dataFrequency),
         alpha: rollingAlpha * 100,
@@ -442,12 +502,12 @@ export default function RiskPage() {
         benchmarkReturn: annualizedBenchmarkReturn * 100,
       });
     }
-    
+
     return result;
   };
 
-  const rolling1YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(252) : [];
-  const rolling3YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(756) : [];
+  const rolling1YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(windowSize1Y) : [];
+  const rolling3YearAlpha = selectedBenchmarkId ? calculateRollingAlpha(windowSize3Y) : [];
 
   return (
     <div className="space-y-6">
@@ -465,30 +525,60 @@ export default function RiskPage() {
         </div>
       </div>
 
+      {portfolioHasPartialData && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Partial data for selected period</AlertTitle>
+          <AlertDescription>
+            Portfolio data starts {earliestDataDate!.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} which
+            is after the {getTimePeriodLabel(selectedTimePeriod)} start
+            date ({startDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}).
+            Showing {performanceHistory.length} available data points.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {benchmarkHasNoData && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Benchmark data not available</AlertTitle>
+          <AlertDescription>
+            No historical return data is available for <strong>{selectedBenchmark?.name || "the selected benchmark"}</strong> during
+            the selected {getTimePeriodLabel(selectedTimePeriod)} period.
+          </AlertDescription>
+        </Alert>
+      )}
+
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <MetricCard
-          title="Sharpe Ratio"
+          title={`Sharpe Ratio${data?.isCustomPortfolio ? " *" : ""}`}
           value={sharpe.toFixed(2)}
           icon={<Shield className="h-5 w-5" />}
           changeLabel={riskLevel.level}
         />
         <MetricCard
-          title="Volatility"
+          title={`Volatility${data?.isCustomPortfolio ? " *" : ""}`}
           value={formatPercent(volatility)}
           icon={<Activity className="h-5 w-5" />}
         />
         <MetricCard
-          title="Max Drawdown"
+          title={`Max Drawdown${data?.isCustomPortfolio ? " *" : ""}`}
           value={formatPercent(maxDrawdown)}
           icon={<TrendingDown className="h-5 w-5" />}
           valueClassName="text-red-500"
         />
         <MetricCard
-          title="VaR (95%)"
+          title={`VaR (95%)${data?.isCustomPortfolio ? " *" : ""}`}
           value={formatVaR(var95, !!data?.isCustomPortfolio)}
           icon={<AlertTriangle className="h-5 w-5" />}
         />
       </div>
+
+      {data?.isCustomPortfolio && (
+        <p className="text-xs text-muted-foreground -mt-3">
+          * Metrics derived from Monte Carlo simulation using synthetic returns. Asset class parameters (expected return, volatility) are used to generate {performanceHistory.length > 0 ? "simulated" : ""} daily return paths. Results represent the median of 100 simulated scenarios and should be interpreted as estimates, not historical performance.
+        </p>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card data-testid="card-drawdown-chart">
@@ -543,8 +633,8 @@ export default function RiskPage() {
 
         <Card data-testid="card-return-distribution">
           <CardHeader>
-            <CardTitle className="text-base font-medium">Return Distribution</CardTitle>
-            <CardDescription>Frequency of {frequencyLabel.toLowerCase()} returns</CardDescription>
+            <CardTitle className="text-base font-medium">Return Distribution{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+            <CardDescription>Frequency of {portfolioCadenceLabels.singular} returns{data?.isCustomPortfolio ? " (simulated)" : ""}</CardDescription>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={280}>
@@ -569,7 +659,7 @@ export default function RiskPage() {
                     borderRadius: "6px",
                     fontSize: 12,
                   }}
-                  formatter={(value: number) => [value, "Days"]}
+                  formatter={(value: number) => [value, portfolioCadenceLabels.periods]}
                 />
                 <ReferenceLine x="0.0%" stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
                 <Bar 
@@ -619,8 +709,8 @@ export default function RiskPage() {
           <CardHeader>
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div>
-                <CardTitle className="text-base font-medium">Risk Metrics</CardTitle>
-                <CardDescription>Comprehensive risk indicators</CardDescription>
+                <CardTitle className="text-base font-medium">Risk Metrics{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+                <CardDescription>Comprehensive risk indicators{data?.isCustomPortfolio ? " (derived from simulated returns)" : ""}</CardDescription>
               </div>
               <Badge 
                 variant="secondary" 
@@ -649,8 +739,8 @@ export default function RiskPage() {
 
       <Card data-testid="card-performance-ratios">
         <CardHeader>
-          <CardTitle className="text-base font-medium">Performance & Risk-Adjusted Ratios</CardTitle>
-          <CardDescription>Key investment performance metrics relative to risk</CardDescription>
+          <CardTitle className="text-base font-medium">Performance & Risk-Adjusted Ratios{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+          <CardDescription>Key investment performance metrics relative to risk{data?.isCustomPortfolio ? " (derived from simulated returns)" : ""}</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -670,8 +760,8 @@ export default function RiskPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <Card data-testid="card-alternative-metrics">
           <CardHeader>
-            <CardTitle className="text-base font-medium">Alternative Investment Metrics</CardTitle>
-            <CardDescription>Specialized metrics for hedge funds, private equity, and alternatives</CardDescription>
+            <CardTitle className="text-base font-medium">Alternative Investment Metrics{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+            <CardDescription>Specialized metrics for hedge funds, private equity, and alternatives{data?.isCustomPortfolio ? " (simulated)" : ""}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -690,8 +780,8 @@ export default function RiskPage() {
 
         <Card data-testid="card-tail-risk">
           <CardHeader>
-            <CardTitle className="text-base font-medium">Tail Risk & Distribution</CardTitle>
-            <CardDescription>Return distribution characteristics and extreme event analysis</CardDescription>
+            <CardTitle className="text-base font-medium">Tail Risk & Distribution{data?.isCustomPortfolio ? " *" : ""}</CardTitle>
+            <CardDescription>Return distribution characteristics and extreme event analysis{data?.isCustomPortfolio ? " (simulated)" : ""}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -1098,42 +1188,23 @@ export default function RiskPage() {
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
               <CardTitle className="text-base font-medium">Rolling Alpha Analysis</CardTitle>
-              <CardDescription>Trailing 1-year and 3-year alpha vs selected benchmark</CardDescription>
+              <CardDescription>Trailing 1-year and 3-year alpha vs {benchmarkDisplayName}</CardDescription>
             </div>
-            <Select value={selectedBenchmarkId ? `${selectedBenchmarkType}:${selectedBenchmarkId}` : ""} onValueChange={handleBenchmarkChange}>
-              <SelectTrigger className="w-[260px]" data-testid="select-alpha-benchmark">
-                <SelectValue placeholder="Select benchmark" />
-              </SelectTrigger>
-              <SelectContent className="max-h-[300px]">
-                {Object.entries(benchmarksByCategory).map(([category, benchmarks]) => (
-                  <div key={category}>
-                    <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground flex items-center gap-2">
-                      {category === "Custom" && <Scale className="h-3 w-3" />}
-                      {category}
-                    </div>
-                    {benchmarks.map((benchmark) => (
-                      <SelectItem 
-                        key={`${benchmark.type}:${benchmark.id}`} 
-                        value={`${benchmark.type}:${benchmark.id}`}
-                      >
-                        <span className="flex items-center gap-2">
-                          {benchmark.name}
-                          {benchmark.type === "composite" && (
-                            <Badge variant="outline" className="text-xs py-0 h-4">Custom</Badge>
-                          )}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </div>
-                ))}
-              </SelectContent>
-            </Select>
+            {selectedBenchmark && (
+              <Badge
+                variant="secondary"
+                className="flex items-center gap-1.5 px-3 py-1.5"
+                style={{ borderLeft: `3px solid ${selectedBenchmark.color || "#6366f1"}` }}
+              >
+                <span className="text-xs">vs {selectedBenchmark.ticker !== "CUSTOM" ? selectedBenchmark.ticker : selectedBenchmark.name}</span>
+              </Badge>
+            )}
           </div>
         </CardHeader>
         <CardContent>
-          {!selectedBenchmarkId ? (
+          {!benchmarkApiId ? (
             <div className="flex flex-col items-center justify-center h-[200px] text-muted-foreground">
-              <p>Select a benchmark to view rolling alpha</p>
+              <p>Select a benchmark from the sidebar to view rolling alpha</p>
             </div>
           ) : (
             <div className="space-y-6">
@@ -1180,7 +1251,7 @@ export default function RiskPage() {
                   </ResponsiveContainer>
                 ) : (
                   <div className="flex items-center justify-center h-[220px] text-muted-foreground text-sm">
-                    Insufficient data for 1-year rolling alpha (requires 252+ trading days)
+                    Insufficient data for 1-year rolling alpha (requires {windowSize1Y}+ {portfolioCadenceLabels.singular} data points)
                   </div>
                 )}
               </div>
@@ -1228,7 +1299,7 @@ export default function RiskPage() {
                   </ResponsiveContainer>
                 ) : (
                   <div className="flex items-center justify-center h-[220px] text-muted-foreground text-sm">
-                    Insufficient data for 3-year rolling alpha (requires 756+ trading days)
+                    Insufficient data for 3-year rolling alpha (requires {windowSize3Y}+ {portfolioCadenceLabels.singular} data points)
                   </div>
                 )}
               </div>
@@ -1236,6 +1307,18 @@ export default function RiskPage() {
           )}
         </CardContent>
       </Card>
+
+      {data?.isCustomPortfolio && (
+        <div className="rounded-lg border border-dashed p-4 space-y-2">
+          <p className="text-xs font-medium text-muted-foreground">* Synthetic / Backtested Data Disclosure</p>
+          <p className="text-xs text-muted-foreground">
+            All risk metrics, ratios, and return distributions marked with (*) for this custom portfolio are derived from a Monte Carlo simulation
+            using synthetically generated daily returns. The simulation runs 100 independent paths based on asset-class-level expected returns
+            and volatilities (e.g., US Equity: 10% return, 16% volatility). Where historical returns have been uploaded for linked strategies,
+            bootstrap sampling from actual returns is used instead. These results are estimates and should not be interpreted as actual historical performance.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

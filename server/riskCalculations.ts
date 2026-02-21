@@ -4,6 +4,7 @@ interface RiskMetricsInput {
   riskFreeRate: number;
   annualizedPortfolioReturn: number;
   annualizedBenchmarkReturn: number;
+  periodsPerYear?: number;
 }
 
 interface CalculatedRiskMetrics {
@@ -166,7 +167,7 @@ function normalCDFInverse(p: number): number {
 }
 
 export function calculateBenchmarkMetrics(input: RiskMetricsInput): CalculatedRiskMetrics {
-  const { portfolioReturns, benchmarkReturns, riskFreeRate, annualizedPortfolioReturn, annualizedBenchmarkReturn } = input;
+  const { portfolioReturns, benchmarkReturns, riskFreeRate, annualizedPortfolioReturn, annualizedBenchmarkReturn, periodsPerYear = 252 } = input;
 
   if (portfolioReturns.length < 10 || benchmarkReturns.length < 10) {
     return {
@@ -229,7 +230,7 @@ export function calculateBenchmarkMetrics(input: RiskMetricsInput): CalculatedRi
   }
 
   const excessReturns = pReturns.map((p, i) => p - bReturns[i]);
-  const trackingError = stdDev(excessReturns) * Math.sqrt(252);
+  const trackingError = stdDev(excessReturns) * Math.sqrt(periodsPerYear);
 
   let informationRatio: number | null = null;
   if (trackingError > 0 && alpha !== null) {
@@ -294,20 +295,21 @@ export function calculateBenchmarkMetrics(input: RiskMetricsInput): CalculatedRi
 }
 
 export function generateSyntheticBenchmarkReturns(
-  days: number,
+  periods: number,
   annualizedReturn: number = 0.10,
-  annualizedVolatility: number = 0.16
+  annualizedVolatility: number = 0.16,
+  periodsPerYear: number = 252
 ): number[] {
-  const dailyReturn = annualizedReturn / 252;
-  const dailyVol = annualizedVolatility / Math.sqrt(252);
+  const periodReturn = annualizedReturn / periodsPerYear;
+  const periodVol = annualizedVolatility / Math.sqrt(periodsPerYear);
 
   const returns: number[] = [];
-  for (let i = 0; i < days; i++) {
+  for (let i = 0; i < periods; i++) {
     const u1 = Math.random();
     const u2 = Math.random();
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    const dailyRet = dailyReturn + dailyVol * z;
-    returns.push(dailyRet);
+    const ret = periodReturn + periodVol * z;
+    returns.push(ret);
   }
 
   return returns;
@@ -436,11 +438,12 @@ export interface HoldingInfo {
 
 export function calculateComponentRisk(
   holdings: HoldingInfo[],
-  portfolioReturns: number[]
+  portfolioReturns: number[],
+  periodsPerYear: number = 252
 ): ComponentRiskResult[] {
   if (holdings.length === 0 || portfolioReturns.length < 10) return [];
 
-  const portfolioVol = stdDev(portfolioReturns) * Math.sqrt(252);
+  const portfolioVol = stdDev(portfolioReturns) * Math.sqrt(periodsPerYear);
   if (portfolioVol === 0) return [];
 
   const results: ComponentRiskResult[] = [];
@@ -455,7 +458,7 @@ export function calculateComponentRisk(
     const portVar = variance(pRet);
 
     const marginalContribution = portVar > 0
-      ? (cov / Math.sqrt(portVar)) * Math.sqrt(252)
+      ? (cov / Math.sqrt(portVar)) * Math.sqrt(periodsPerYear)
       : 0;
 
     const componentContribution = holding.weight * marginalContribution;
@@ -483,7 +486,8 @@ export function calculateComponentRisk(
 
 export function calculateFactorDecomposition(
   portfolioReturns: number[],
-  benchmarkReturns: number[]
+  benchmarkReturns: number[],
+  periodsPerYear: number = 252
 ): FactorDecomposition {
   if (portfolioReturns.length < 20 || benchmarkReturns.length < 20) {
     return {
@@ -509,12 +513,12 @@ export function calculateFactorDecomposition(
     ? Math.pow(cov, 2) / (portVar * benchVar)
     : 0;
 
-  const totalRisk = Math.sqrt(portVar) * Math.sqrt(252);
+  const totalRisk = Math.sqrt(portVar) * Math.sqrt(periodsPerYear);
   const systematicVariance = beta * beta * benchVar;
   const idiosyncraticVariance = Math.max(0, portVar - systematicVariance);
 
-  const systematicRisk = Math.sqrt(systematicVariance) * Math.sqrt(252);
-  const idiosyncraticRisk = Math.sqrt(idiosyncraticVariance) * Math.sqrt(252);
+  const systematicRisk = Math.sqrt(systematicVariance) * Math.sqrt(periodsPerYear);
+  const idiosyncraticRisk = Math.sqrt(idiosyncraticVariance) * Math.sqrt(periodsPerYear);
 
   const totalVariance = systematicVariance + idiosyncraticVariance;
   const systematicPct = totalVariance > 0 ? systematicVariance / totalVariance : 0;
@@ -533,7 +537,8 @@ export function calculateFactorDecomposition(
 export function calculateAdvancedTailMetrics(
   portfolioReturns: number[],
   portfolioValues: number[],
-  riskFreeRate: number
+  riskFreeRate: number,
+  periodsPerYear: number = 252
 ): AdvancedTailMetrics {
   const cfVaR95 = cornishFisherVaR(portfolioReturns, 0.95);
   const cfVaR99 = cornishFisherVaR(portfolioReturns, 0.99);
@@ -555,10 +560,10 @@ export function calculateAdvancedTailMetrics(
   }
 
   const adjustedVol = sigma * Math.sqrt(1 + (kurt / 4));
-  const excessKurtosisAdjustedVol = adjustedVol * Math.sqrt(252);
+  const excessKurtosisAdjustedVol = adjustedVol * Math.sqrt(periodsPerYear);
 
-  const annualizedReturn = mu * 252;
-  const annualizedVol = sigma * Math.sqrt(252);
+  const annualizedReturn = mu * periodsPerYear;
+  const annualizedVol = sigma * Math.sqrt(periodsPerYear);
   let modifiedSharpe = 0;
   if (annualizedVol > 0) {
     const zc = normalCDFInverse(0.95);
@@ -664,12 +669,13 @@ export function runMonteCarloStress(
     volMultiplier: number;
   },
   numPaths: number = 100,
-  horizon: number = 252
+  horizon: number = 252,
+  periodsPerYear: number = 252
 ): MonteCarloStressResult {
   const mu = mean(portfolioReturns);
   const sigma = stdDev(portfolioReturns);
 
-  const stressedMu = mu + scenario.meanShift / 252;
+  const stressedMu = mu + scenario.meanShift / periodsPerYear;
   const stressedSigma = sigma * scenario.volMultiplier;
 
   const paths: MonteCarloStressPath[] = [];
