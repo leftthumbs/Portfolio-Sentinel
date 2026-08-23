@@ -203,6 +203,22 @@ def main(argv=None) -> int:
     if not docs:
         sys.exit("The manifest has no captured pages. Check the capture output for errors.")
 
+    # A capture run with --discard-pages keeps only the collated PDFs, so say that
+    # plainly instead of printing one "missing file" line per page.
+    present = sum(
+        1 for d in docs for pg in d["pages"] if (capture_dir / d["dir"] / pg["file"]).exists()
+    )
+    if not present:
+        collated = [d for d in docs if d.get("pdf")]
+        if collated:
+            sys.exit(
+                f"The page images are gone from {capture_dir} - this capture was run with\n"
+                f"--discard-pages, so the {len(collated)} collated PDF(s) in {capture_dir / 'pdf'}\n"
+                "are the copy. Word notebooks need the page images: re-capture without\n"
+                "--discard-pages if you want them."
+            )
+        sys.exit(f"No page images found under {capture_dir}. Re-run the capture.")
+
     out_dir = Path(args.out).expanduser().resolve() if args.out else capture_dir / "word"
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Building Word notebooks in {out_dir}")
@@ -210,7 +226,10 @@ def main(argv=None) -> int:
     if args.mode == "single":
         room = (manifest.get("room_title") or "dataroom").strip()[:60] or "dataroom"
         safe = " ".join("".join(c for c in room if c.isalnum() or c in " -_.").split()) or "dataroom"
-        results = [build_single(docs, capture_dir, out_dir / f"{safe}.docx", args, manifest)]
+        # Date-stamp the combined file: one file per room per capture is far
+        # easier to keep straight than a single name that silently gets replaced.
+        stamp = (manifest.get("captured_at") or "")[:10] or "undated"
+        results = [build_single(docs, capture_dir, out_dir / f"{safe} {stamp}.docx", args, manifest)]
     else:
         results = []
         for d in docs:

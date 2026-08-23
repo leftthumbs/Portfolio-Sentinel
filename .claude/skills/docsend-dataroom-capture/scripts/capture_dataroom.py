@@ -29,6 +29,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import tempfile
 import time
 import sys
 from datetime import datetime, timezone
@@ -45,13 +47,18 @@ except ImportError:  # pragma: no cover - environment guard
     )
 
 
-# Three URL shapes matter, and conflating them is the classic way to find zero
-# documents in a room that plainly has them:
-#   /view/<id>                      a standalone document
-#   /view/s/<space-id>              the space (dataroom) itself — not a document
-#   /view/s/<space-id>/d/<doc-id>   a document *inside* a space
-# The third is what a space's own file list links to, so it has to be recognised
-# even though it also begins with /view/s/. Check it first for that reason.
+try:
+    from PIL import Image
+except ImportError:  # collation is skipped rather than fatal
+    Image = None
+
+
+# Three URL shapes matter, and conflating them is how a room full of documents
+# yields zero, or one phantom:
+#   /view/<id>                    a standalone document
+#   /view/s/<space>               the space (dataroom) itself - not a document
+#   /view/<space>/d/<doc>         a document *inside* a space, s/ prefix optional
+# The nested shape is what a room's file list links to, so it is tested first.
 # A document inside a space is /view/<space>/d/<doc>, and the space segment may
 # or may not carry the s/ prefix — both forms are in the wild, and the one
 # without it is easy to mistake for a standalone /view/<id> document, which
@@ -158,6 +165,132 @@ def ext_for(content_type: str | None, url: str) -> str:
     if m:
         return ".jpg" if m.group(1).startswith("jp") else "." + m.group(1)
     return ".png"
+
+
+def short_id(doc_id: str, length: int = 8) -> str:
+    """A filename-safe fragment of a document id, for uniqueness."""
+    return re.sub(r"[^A-Za-z0-9]", "", doc_id or "")[:length] or "doc"
+
+
+def page_filename(prefix: str, n: int, ext: str) -> str:
+    """Name a page image so it stays unique outside its folder.
+
+    Page numbers alone (p001.jpg) collide the moment images from two documents,
+    or two captures of the same room, end up in one place - and the loss is
+    silent, because the newer file simply replaces the older one. Carrying the
+    document id in the name makes every image globally identifiable, so files can
+    be moved, merged or re-filed without a rename step.
+    """
+    return f"{prefix}-p{n:03d}{ext}" if prefix else f"p{n:03d}{ext}"
+
+
+def resolve_output_dir(base: Path, source_url: str, room_title: str, mode: str) -> Path:
+    """Keep a different room from writing over an earlier capture.
+
+    Reusing one output folder for every dataroom is the natural thing to do and
+    the thing that quietly destroys data: the second room's 01-* folders and
+    Word files land on top of the first room's. So a folder already holding a
+    capture of a *different* room gets a named subfolder instead. The same room
+    refreshes in place, which is what a re-run should do.
+    """
+    manifest = base / "manifest.json"
+    if mode == "overwrite" or not manifest.exists():
+        return base
+    try:
+        prior_url = json.loads(manifest.read_text()).get("source_url")
+    except Exception:
+        return base
+    if prior_url == source_url:
+        return base
+    if mode == "fail":
+        raise SystemExit(
+            f"{base} already holds a capture of a different room ({prior_url}).\n"
+            "Choose another --out, or use --if-exists nest to capture into a subfolder."
+        )
+    slug = slugify(room_title or "room", "room")
+    for n in range(1, 100):
+        candidate = base / (slug if n == 1 else f"{slug}-{n}")
+        prior_file = candidate / "manifest.json"
+        if not prior_file.exists():
+            log(f"  {base} holds another room; capturing into {candidate.name}/ instead")
+            return candidate
+        try:
+            if json.loads(prior_file.read_text()).get("source_url") == source_url:
+                log(f"  refreshing existing capture in {candidate.name}/")
+                return candidate
+        except Exception:
+            pass
+    return base / f"{slug}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+
+def clear_stale_pages(folder: Path) -> int:
+    """Drop page images left by an earlier capture of this document.
+
+    Without this, a re-run that captures fewer pages (or switches strategy and
+    therefore file extension) leaves orphans behind that look like real pages to
+    anyone browsing the folder.
+    """
+    removed = 0
+    for f in folder.glob("*"):
+        if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def collate_pdf(pages: list[dict], page_dir: Path, out_path: Path,
+                max_width: int, quality: int) -> tuple[int, str | None]:
+    """Write one PDF holding every captured page of a document.
+
+    A folder of p001..p068 images is an intermediate, not a deliverable: nobody
+    reads a document by opening sixty-eight files. PDF is the container scanned
+    pages belong in - it opens everywhere, keeps the page order, and annotates.
+
+    Pages are converted one at a time and handed to Pillow as file-backed images
+    so the encoder pulls them in sequence; holding sixty decoded pages in memory
+    at once would cost gigabytes on a large document.
+    """
+    if Image is None:
+        return 0, "Pillow is not installed, so pages were not collated"
+    files = [page_dir / pg["file"] for pg in pages]
+    files = [f for f in files if f.exists()]
+    if not files:
+        return 0, "no page images to collate"
+
+    work = Path(tempfile.mkdtemp(prefix="docsend-pdf-"))
+    prepared: list[Path] = []
+    try:
+        for src in files:
+            try:
+                with Image.open(src) as im:
+                    im = im.convert("RGB")
+                    if im.width > max_width:
+                        im = im.resize((max_width, round(im.height * max_width / im.width)),
+                                       Image.LANCZOS)
+                    dest = work / (src.stem + ".jpg")
+                    im.save(dest, "JPEG", quality=quality, optimize=True)
+                prepared.append(dest)
+            except Exception as exc:
+                return 0, f"could not read {src.name}: {exc}"
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        first = Image.open(prepared[0])
+        rest = [Image.open(f) for f in prepared[1:]]
+        try:
+            first.save(str(out_path), "PDF", save_all=True, append_images=rest,
+                       resolution=150.0)
+        finally:
+            first.close()
+            for im in rest:
+                im.close()
+        return len(prepared), None
+    except Exception as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def doc_base(url: str) -> str:
@@ -544,7 +677,8 @@ async def download(context, url: str, referer: str) -> tuple[bytes, str] | None:
         return None
 
 
-async def strategy_page_data(context, base: str, count: int | None, out_dir: Path, max_pages: int) -> list[dict]:
+async def strategy_page_data(context, base: str, count: int | None, out_dir: Path, max_pages: int,
+                             prefix: str = "") -> list[dict]:
     """DocSend's /page_data/<n> JSON gives a signed URL per page image."""
     pages: list[dict] = []
     limit = count or max_pages
@@ -572,14 +706,15 @@ async def strategy_page_data(context, base: str, count: int | None, out_dir: Pat
         if got is None:
             break
         body, ctype = got
-        name = f"p{n:03d}{ext_for(ctype, img_url)}"
+        name = page_filename(prefix, n, ext_for(ctype, img_url))
         await save_bytes(out_dir / name, body)
         pages.append({"n": n, "file": name})
         log(f"      page {n}" + (f"/{count}" if count else ""))
     return pages
 
 
-async def strategy_dom(page, context, base: str, count: int | None, out_dir: Path, max_pages: int) -> list[dict]:
+async def strategy_dom(page, context, base: str, count: int | None, out_dir: Path, max_pages: int,
+                       prefix: str = "") -> list[dict]:
     """Read the images the viewer itself renders, downloading their bytes.
 
     Handles both scroll-all-pages viewers and one-page-at-a-time viewers.
@@ -634,14 +769,15 @@ async def strategy_dom(page, context, base: str, count: int | None, out_dir: Pat
         if got is None:
             continue
         body, ctype = got
-        name = f"p{idx:03d}{ext_for(ctype, src)}"
+        name = page_filename(prefix, idx, ext_for(ctype, src))
         await save_bytes(out_dir / name, body)
         pages.append({"n": idx, "file": name})
         log(f"      page {idx} (dom)")
     return pages
 
 
-async def strategy_screenshot(page, count: int | None, out_dir: Path, max_pages: int) -> list[dict]:
+async def strategy_screenshot(page, count: int | None, out_dir: Path, max_pages: int,
+                              prefix: str = "") -> list[dict]:
     """Screenshot the rendered page element. Works even for canvas viewers."""
     limit = count or max_pages
     pages: list[dict] = []
@@ -656,7 +792,7 @@ async def strategy_screenshot(page, count: int | None, out_dir: Path, max_pages:
             except Exception:
                 continue
         shot = await (target.screenshot(type="png") if target else page.screenshot(type="png", full_page=False))
-        name = f"p{n:03d}.png"
+        name = page_filename(prefix, n, ".png")
         await save_bytes(out_dir / name, shot)
         pages.append({"n": n, "file": name})
         log(f"      page {n} (screenshot)")
@@ -693,9 +829,16 @@ async def capture_document(
             label = re.sub(r"\s*\S{0,4}\s*DocSend\s*$", "", raw, flags=re.I).strip() or doc["id"]
         record["title"] = label
         log(f"  [{index}/{total}] {label}")
-        sub = out_root / f"{index:02d}-{slugify(label, doc['id'])}"
+        # The document id in the folder name keeps two documents with the same
+        # title apart, and keeps a re-run pointing at the same folder even when
+        # discovery returns the room in a different order.
+        prefix = short_id(doc["id"])
+        sub = out_root / f"{index:02d}-{slugify(label, doc['id'])}-{prefix}"
         if not args.dry_run:
             sub.mkdir(parents=True, exist_ok=True)
+            stale = clear_stale_pages(sub)
+            if stale:
+                log(f"      cleared {stale} page image(s) from a previous capture")
         record["dir"] = sub.name
 
         count = await get_page_count(page)
@@ -707,9 +850,9 @@ async def capture_document(
         base = doc_base(page.url)
         pages: list[dict] = []
         candidates = [
-            ("page_data", lambda: strategy_page_data(context, base, count, sub, args.max_pages)),
-            ("dom", lambda: strategy_dom(page, context, base, count, sub, args.max_pages)),
-            ("screenshot", lambda: strategy_screenshot(page, count, sub, args.max_pages)),
+            ("page_data", lambda: strategy_page_data(context, base, count, sub, args.max_pages, prefix)),
+            ("dom", lambda: strategy_dom(page, context, base, count, sub, args.max_pages, prefix)),
+            ("screenshot", lambda: strategy_screenshot(page, count, sub, args.max_pages, prefix)),
         ]
         enabled = [c for c in candidates if args.strategy in ("auto", c[0])]
         for position, (name, runner) in enumerate(enabled):
@@ -733,6 +876,26 @@ async def capture_document(
         if count and record["page_count"] < count:
             record["error"] = f"captured {record['page_count']} of {count} reported pages"
             log(f"      WARNING: {record['error']}")
+
+        if args.collate == "pdf" and record["pages"]:
+            pdf_dir = out_root / "pdf"
+            pdf_path = pdf_dir / f"{sub.name}.pdf"
+            written, problem = collate_pdf(
+                record["pages"], sub, pdf_path, args.pdf_max_width, args.pdf_quality
+            )
+            if problem:
+                log(f"      could not collate PDF: {problem}")
+            else:
+                record["pdf"] = f"pdf/{pdf_path.name}"
+                size = pdf_path.stat().st_size / 1024
+                log(f"      collated {written} page(s) -> {pdf_path.name} ({size:.0f}KB)")
+                # Only drop the page images once the PDF is on disk with the
+                # right number of pages: an unverified delete is a data loss bug.
+                if args.discard_pages and written == record["page_count"]:
+                    for pg in record["pages"]:
+                        (sub / pg["file"]).unlink(missing_ok=True)
+                    record["pages_discarded"] = True
+                    log(f"      removed {written} page image(s); the PDF is the copy now")
     except Exception as exc:
         record["error"] = f"{type(exc).__name__}: {exc}"
         log(f"      ERROR: {record['error']}")
@@ -791,7 +954,9 @@ async def main_async(args) -> int:
         except Exception:
             pass
 
-        room_title = (await page.title() or "dataroom").strip()
+        room_title = re.sub(
+            r"\s*\S{0,4}\s*DocSend\s*$", "", (await page.title() or "").strip(), flags=re.I
+        ).strip() or "dataroom"
         if args.doc_url:
             docs = []
             for url in args.doc_url:
@@ -816,6 +981,9 @@ async def main_async(args) -> int:
                 log("  (%s) — that is usually the room's own link, not a file." % space.group(1))
                 log("  If the room shows more documents than were found, re-run with --debug")
                 log("  and check room-debug.png, or pass each document's URL via --doc-url.")
+
+        out_root = resolve_output_dir(out_root, args.url, room_title, args.if_exists)
+        out_root.mkdir(parents=True, exist_ok=True)
 
         # A title shared by several documents is worse than no title at all: the
         # viewer knows its own name, so let the per-document capture ask it.
@@ -867,7 +1035,10 @@ async def main_async(args) -> int:
             log(f"  {r['title']}: {r.get('reported_page_count') or 'unknown'} pages  ({r['url']})")
         log(f"Manifest: {out_root / 'manifest.json'}")
         return 0
+    pdfs = [r for r in records if r.get("pdf")]
     log(f"Captured {total_pages} pages from {len(records)} document(s) into {out_root}")
+    if pdfs:
+        log(f"Collated {len(pdfs)} document(s) into {out_root / 'pdf'}")
     log(f"Manifest: {out_root / 'manifest.json'}")
     if failed:
         log(f"{len(failed)} document(s) need attention:")
@@ -882,6 +1053,9 @@ def parse_args(argv=None):
     p.add_argument("--email", required=True, help="Email to enter at the DocSend gate")
     p.add_argument("--passcode", default=None, help="Passcode, if the link is protected")
     p.add_argument("--out", default="docsend-capture", help="Output directory (default: ./docsend-capture)")
+    p.add_argument("--if-exists", choices=["nest", "overwrite", "fail"], default="nest",
+                   help="When --out already holds a capture of a DIFFERENT room: "
+                        "nest in a named subfolder (default), write over it, or stop")
     p.add_argument("--doc-url", action="append", default=[], help="Capture only these /view/<id> URLs (repeatable)")
     p.add_argument("--only", default=None, help="Only documents whose title contains this text")
     p.add_argument("--strategy", choices=["auto", "page_data", "dom", "screenshot"], default="auto")
@@ -896,6 +1070,15 @@ def parse_args(argv=None):
                    help="Override the browser user agent (default: this browser's UA, de-headlessed)")
     p.add_argument("--session-state", default=None, help="Path to save/reuse cookies between runs")
     p.add_argument("--accept-agreements", action="store_true", help="Tick an NDA/terms checkbox if present")
+    p.add_argument("--collate", choices=["pdf", "none"], default="pdf",
+                   help="Assemble each document's pages into one PDF (default: pdf)")
+    p.add_argument("--discard-pages", action="store_true",
+                   help="Delete the per-page images once the PDF is written and verified. "
+                        "Note that build_docx.py needs those images, so keep them if you "
+                        "also want Word notebooks")
+    p.add_argument("--pdf-max-width", type=int, default=1600,
+                   help="Downscale pages wider than this when collating (default: 1600)")
+    p.add_argument("--pdf-quality", type=int, default=85, help="PDF JPEG quality (default: 85)")
     p.add_argument("--dry-run", action="store_true", help="List documents and page counts without downloading")
     p.add_argument("--debug", action="store_true",
                    help="Also dump the room page (room-debug.png/.html) and every link found")

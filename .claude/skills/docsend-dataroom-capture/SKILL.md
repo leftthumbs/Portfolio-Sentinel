@@ -36,7 +36,7 @@ All four live in `scripts/` next to this file:
 | --- | --- |
 | `setup.sh` / `setup.ps1` | One-time: virtualenv + Playwright + python-docx + Pillow + Chromium (bash / PowerShell) |
 | `dashboard.py` / `dashboard.ps1` | Local web UI over the whole flow: saved rooms, live log, results table, one-click Word build |
-| `capture_dataroom.py` | Gate → discover documents → save page images + `manifest.json` |
+| `capture_dataroom.py` | Gate → discover documents → save page images, collate a PDF per document, write `manifest.json` |
 | `build_docx.py` | `manifest.json` → one Word notebook per document (**default export**) |
 | `export_to_notes.py` | `manifest.json` → Apple Notes folder, one note per document (macOS) |
 
@@ -147,8 +147,11 @@ a big room, `--headed` to watch the browser (or solve an unusual gate by hand),
 `--session-state ~/.docsend-capture/session.json` to reuse cookies next time,
 `--strategy screenshot` to force pixel capture.
 
-The script writes `<out>/<NN>-<document-title>/p001.jpg…` plus
-`<out>/manifest.json`, and prints a per-document count as it goes.
+The script writes `<out>/<NN>-<title>-<docid>/<docid>-p001.jpg…`, one collated
+PDF per document in `<out>/pdf/`, and `<out>/manifest.json`. Page images and
+folders carry the document id so nothing collides when captures are merged or
+re-run; a folder already holding a *different* room gets its own subfolder rather
+than being overwritten (`--if-exists`).
 
 ### 5. Check completeness before exporting
 
@@ -165,7 +168,19 @@ $VENV scripts/capture_dataroom.py "<doc-url>" --email you@example.com \
 Report honestly if a document stayed incomplete — a Word file that silently
 skips pages 14–20 of a term sheet is worse than a warning.
 
-### 6. Export
+### 6. What you already have: one PDF per document
+
+Capture collates each document's pages into a single PDF as it finishes, in
+`<out>/pdf/`. That is usually the deliverable people actually want — nobody reads
+a document by opening sixty-eight image files — so it is on by default
+(`--collate none` turns it off).
+
+The per-page images stay on disk because the Word build needs them.
+`--discard-pages` removes them once the PDF is written and its page count
+verified, leaving one file per document and nothing else. Say out loud that this
+makes the PDFs the only copy, since Word notebooks cannot be built afterwards.
+
+### 7. Export
 
 ```bash
 $VENV scripts/build_docx.py ~/Desktop/room                    # one .docx per document + index
@@ -187,7 +202,7 @@ $VENV scripts/export_to_notes.py ~/Desktop/room --folder "Series A — Acme"
 Long documents are split across several notes (`--max-pages-per-note`, default
 40) because a single note holding hundreds of images becomes unusable.
 
-### 7. Tell the user what they got
+### 8. Tell the user what they got
 
 Report the output directory, the document and page counts, the total size, and
 anything that came up short. If they asked for Notes and the images were

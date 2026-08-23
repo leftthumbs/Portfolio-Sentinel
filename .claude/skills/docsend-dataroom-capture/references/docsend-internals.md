@@ -153,6 +153,36 @@ Expect it in the output and in anything built from the output.
 }
 ```
 
+## Filenames and collisions
+
+Two captures must never be able to quietly overwrite each other, because the
+loss is silent: a page or a whole document is simply replaced, and nothing in the
+output says so. Three rules keep that from happening.
+
+**Page images carry their document id**: `hkft3557-p001.png`, not `p001.png`.
+Page numbers alone collide the moment images from two documents land in one
+folder, which is exactly what happens when someone flattens a capture to file or
+attach the images. DocSend document ids are per-document, so the prefix makes
+each image identifiable on its own.
+
+**Document folders carry the id too**: `04-Volt-III-Deck-wzqsmww2`. Two documents
+in one room can share a title, and the ordinal prefix is not stable across runs
+because discovery order varies with concurrency — so without the id, a re-run can
+point folder `01-` at a different document than last time.
+
+**A folder holding a different room gets a subfolder.** `resolve_output_dir`
+compares `source_url` in any existing `manifest.json` against the room being
+captured. Same room refreshes in place, which is what a re-run should do; a
+different room nests under a slug of its title. `--if-exists` chooses
+`nest` (default), `overwrite`, or `fail`. Re-using one output folder for every
+dataroom is the natural habit and the one that destroys data.
+
+A refresh also calls `clear_stale_pages` first, so a capture that yields fewer
+pages than last time — or switches strategy and therefore file extension — does
+not leave orphans that look like real pages.
+
+## Manifest
+
 Both exporters read only this file plus the image files it names, so a capture
 can be re-exported at any quality without re-downloading, and a hand-edited
 manifest (dropping a document, reordering pages) is a legitimate way to fix up a

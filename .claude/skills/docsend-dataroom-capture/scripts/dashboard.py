@@ -130,14 +130,22 @@ def read_manifest(out_dir: str) -> dict | None:
         return None
 
 
-def word_files(out_dir: str) -> list[dict]:
-    folder = Path(out_dir) / "word"
+def output_files(out_dir: str, subfolder: str, pattern: str) -> list[dict]:
+    folder = Path(out_dir) / subfolder
     if not folder.is_dir():
         return []
     return sorted(
-        ({"name": f.name, "bytes": f.stat().st_size} for f in folder.glob("*.docx")),
+        ({"name": f.name, "bytes": f.stat().st_size} for f in folder.glob(pattern)),
         key=lambda f: f["name"],
     )
+
+
+def word_files(out_dir: str) -> list[dict]:
+    return output_files(out_dir, "word", "*.docx")
+
+
+def pdf_files(out_dir: str) -> list[dict]:
+    return output_files(out_dir, "pdf", "*.pdf")
 
 
 def reveal(path: str) -> str:
@@ -232,11 +240,13 @@ class Handler(BaseHTTPRequestHandler):
             if payload["status"] != "running":
                 payload["manifest"] = read_manifest(job["out"])
                 payload["word"] = word_files(job["out"])
+                payload["pdf"] = pdf_files(job["out"])
             return self._json(payload)
         if route.path == "/api/capture":
             params = parse_qs(route.query)
             out = (params.get("out") or [""])[0]
-            return self._json({"manifest": read_manifest(out), "word": word_files(out)})
+            return self._json({"manifest": read_manifest(out), "word": word_files(out),
+                               "pdf": pdf_files(out)})
         return self._send(404, b"not found", "text/plain")
 
     def do_POST(self) -> None:
@@ -271,6 +281,9 @@ class Handler(BaseHTTPRequestHandler):
                 argv += ["--session-state", str(SESSION_FILE)]
             if body.get("browser_path"):
                 argv += ["--browser-path", body["browser_path"]]
+            argv += ["--collate", "pdf" if body.get("collate", True) else "none"]
+            if body.get("discard_pages"):
+                argv.append("--discard-pages")
 
             if body.get("save_room"):
                 upsert_room({
@@ -358,7 +371,6 @@ PAGE = r"""<!doctype html>
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
   button:disabled { opacity: .55; cursor: default; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-  details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 10px; }
   .rooms { list-style: none; margin: 0; padding: 0; }
   .rooms li { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); }
   .rooms li:first-child { border-top: 0; }
@@ -416,31 +428,32 @@ PAGE = r"""<!doctype html>
       <label><input id="debug" type="checkbox"> Debug dump</label>
     </div>
 
-    <details>
-      <summary>More options</summary>
-      <div class="row">
-        <label>Strategy
-          <select id="strategy">
-            <option value="auto">auto</option>
-            <option value="page_data">page_data</option>
-            <option value="dom">dom</option>
-            <option value="screenshot">screenshot</option>
-          </select>
-        </label>
-        <label>Parallel documents
-          <input id="concurrency" type="number" min="1" max="8" value="4">
-        </label>
-      </div>
-      <label>Chrome executable (optional)
-        <input id="browser_path" type="text" placeholder="C:\Program Files\Google\Chrome\Application\chrome.exe">
+    <div class="row">
+      <label>Strategy
+        <select id="strategy">
+          <option value="auto">auto</option>
+          <option value="page_data">page_data</option>
+          <option value="dom">dom</option>
+          <option value="screenshot">screenshot</option>
+        </select>
       </label>
-      <div class="checks">
-        <label><input id="save_room" type="checkbox" checked> Remember this room</label>
-        <label><input id="save_passcode" type="checkbox"> Also store passcode</label>
-      </div>
-      <p class="hint">Stored rooms live in a plain JSON file in your home folder, so leave the
-      passcode box unchecked unless the convenience is worth that.</p>
-    </details>
+      <label>Parallel documents
+        <input id="concurrency" type="number" min="1" max="8" value="4">
+      </label>
+    </div>
+    <label>Chrome executable (optional)
+      <input id="browser_path" type="text" placeholder="C:\Program Files\Google\Chrome\Application\chrome.exe">
+    </label>
+    <div class="checks">
+      <label><input id="collate" type="checkbox" checked> Collate each document into one PDF</label>
+      <label><input id="discard_pages" type="checkbox"> Delete page images after collating</label>
+      <label><input id="save_room" type="checkbox" checked> Remember this room</label>
+      <label><input id="save_passcode" type="checkbox"> Also store passcode</label>
+    </div>
+    <p class="hint">Deleting the page images leaves the PDFs as the only copy, and Word
+    notebooks are built from those images - so leave that box unticked if you want Word files.</p>
+    <p class="hint">Stored rooms live in a plain JSON file in your home folder, so leave the
+    passcode box unchecked unless the convenience is worth that.</p>
 
     <div class="actions">
       <button id="run" class="primary">Capture</button>
@@ -495,6 +508,7 @@ const fields = () => ({
   headed: $("headed").checked, use_session: $("use_session").checked,
   strategy: $("strategy").value, concurrency: Number($("concurrency").value),
   browser_path: $("browser_path").value,
+  collate: $("collate").checked, discard_pages: $("discard_pages").checked,
   save_room: $("save_room").checked, save_passcode: $("save_passcode").checked,
   room_name: $("room_name").value,
 });
@@ -514,13 +528,13 @@ const poll = (jobId, label) => {
       busy(false);
       const ok = data.returncode === 0;
       setStatus(ok ? "done" : "failed", `${label} ${ok ? "finished" : "failed (exit " + data.returncode + ")"}`);
-      render(data.manifest, data.word);
+      render(data.manifest, data.word, data.pdf);
       loadRooms();
     }
   }, 700);
 };
 
-const render = (manifest, word) => {
+const render = (manifest, word, pdf) => {
   const box = $("results");
   box.innerHTML = "";
   if (manifest && manifest.documents) {
@@ -542,20 +556,24 @@ const render = (manifest, word) => {
     }</tbody></table>`;
     box.appendChild(wrap);
   }
-  if (word && word.length) {
-    const h = document.createElement("h2");
-    h.style.marginTop = "18px";
-    h.textContent = `${word.length} Word file(s)`;
-    box.appendChild(h);
-    const ul = document.createElement("ul");
-    ul.className = "rooms";
-    word.forEach(f => {
-      const li = document.createElement("li");
-      li.innerHTML = `<span style="flex:1">${esc(f.name)}</span><small>${(f.bytes / 1024).toFixed(0)} KB</small>`;
-      ul.appendChild(li);
-    });
-    box.appendChild(ul);
-  }
+  fileList(box, pdf, "PDF file(s)");
+  fileList(box, word, "Word file(s)");
+};
+
+const fileList = (box, files, label) => {
+  if (!files || !files.length) return;
+  const h = document.createElement("h2");
+  h.style.marginTop = "18px";
+  h.textContent = `${files.length} ${label}`;
+  box.appendChild(h);
+  const ul = document.createElement("ul");
+  ul.className = "rooms";
+  files.forEach(f => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span style="flex:1">${esc(f.name)}</span><small>${(f.bytes / 1024).toFixed(0)} KB</small>`;
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
 };
 
 const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => (
@@ -616,7 +634,7 @@ $("open").onclick = () => api("/api/reveal", { path: $("out").value });
 loadRooms();
 (async () => {
   const data = await api(`/api/capture?out=${encodeURIComponent($("out").value)}`);
-  if (data.manifest) render(data.manifest, data.word);
+  if (data.manifest) render(data.manifest, data.word, data.pdf);
 })();
 </script>
 </body>
