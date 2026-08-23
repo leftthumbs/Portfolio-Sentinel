@@ -166,6 +166,19 @@ export default function RiskPage() {
       drawdownRecoveryDays: number | null;
       conditionalDrawdown95: number;
     };
+    smoothing: {
+      rho1: number;
+      autocorrelations: number[];
+      ljungBox: { statistic: number; degreesOfFreedom: number; pValue: number; significant: boolean };
+      smoothingIndex: number | null;
+      unsmoothingApplied: boolean;
+      reason: string | null;
+      observedVolatility: number;
+      unsmoothedVolatility: number;
+      volatilityRatio: number;
+      observedSharpe: number | null;
+      unsmoothedSharpe: number | null;
+    };
     componentRisk: {
       name: string;
       assetClass: string;
@@ -816,6 +829,108 @@ export default function RiskPage() {
               </div>
             ))}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card data-testid="card-return-smoothing">
+        <CardHeader>
+          <CardTitle className="text-base font-medium">Return Smoothing & Illiquidity Adjustment</CardTitle>
+          <CardDescription>
+            Appraisal-based and stale-priced marks damp reported volatility. Getmansky-Lo-Makarov
+            diagnostics with a first-order (Geltner) correction.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {advancedRiskData?.smoothing ? (
+            <div className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                {[
+                  {
+                    label: "Autocorrelation (lag 1)",
+                    value: (advancedRiskData.smoothing.rho1 ?? 0).toFixed(3),
+                    desc: "Above ~0.2 suggests smoothed marks",
+                  },
+                  {
+                    label: "Smoothing Index",
+                    value: advancedRiskData.smoothing.smoothingIndex === null
+                      ? "n/a"
+                      : advancedRiskData.smoothing.smoothingIndex.toFixed(3),
+                    desc: "GLM \u03be — 1.0 is unsmoothed, 0.5 is the MA(1) floor",
+                  },
+                  {
+                    label: "Ljung-Box p-value",
+                    value: (advancedRiskData.smoothing.ljungBox?.pValue ?? 1).toFixed(4),
+                    desc: advancedRiskData.smoothing.ljungBox?.significant
+                      ? "Serial correlation is significant at 5%"
+                      : "No significant serial correlation",
+                  },
+                  {
+                    label: "Volatility Understated By",
+                    value: advancedRiskData.smoothing.unsmoothingApplied
+                      ? `${(((advancedRiskData.smoothing.volatilityRatio ?? 1) - 1) * 100).toFixed(1)}%`
+                      : "n/a",
+                    desc: "How much the smoothing was hiding",
+                  },
+                ].map((m) => (
+                  <div key={m.label} className="p-4 border rounded-lg">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-sm font-medium text-muted-foreground">{m.label}</span>
+                      <span className="text-2xl font-semibold">{m.value}</span>
+                      <span className="text-xs text-muted-foreground">{m.desc}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {advancedRiskData.smoothing.unsmoothingApplied ? (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="p-4 border rounded-lg">
+                    <span className="text-sm font-medium text-muted-foreground">Volatility</span>
+                    <p className="text-2xl font-semibold">
+                      {formatPercent(advancedRiskData.smoothing.observedVolatility)}
+                      <span className="mx-2 text-muted-foreground">&rarr;</span>
+                      {formatPercent(advancedRiskData.smoothing.unsmoothedVolatility)}
+                    </p>
+                    <span className="text-xs text-muted-foreground">Reported, then unsmoothed</span>
+                  </div>
+                  <div className="p-4 border rounded-lg">
+                    <span className="text-sm font-medium text-muted-foreground">Sharpe Ratio</span>
+                    <p className="text-2xl font-semibold">
+                      {(advancedRiskData.smoothing.observedSharpe ?? 0).toFixed(2)}
+                      <span className="mx-2 text-muted-foreground">&rarr;</span>
+                      {(advancedRiskData.smoothing.unsmoothedSharpe ?? 0).toFixed(2)}
+                    </p>
+                    <span className="text-xs text-muted-foreground">Reported, then unsmoothed</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 border rounded-lg bg-muted/40">
+                  <p className="text-sm text-muted-foreground">
+                    No adjustment applied. {advancedRiskData.smoothing.reason}
+                  </p>
+                </div>
+              )}
+
+              <div className="text-sm text-muted-foreground border-t pt-4">
+                <p className="mb-2">
+                  Illiquid holdings are marked from appraisals rather than traded quotes, so a
+                  reported return is partly an echo of prior periods. That damps measured
+                  volatility and flatters Sharpe. The lag-1 autocorrelation is the tell: traded
+                  monthly returns show little, while appraisal-based series routinely run 0.3 or
+                  more.
+                </p>
+                <p>
+                  The correction assumes an MA(1) and reverses it as
+                  r&#8348; = (r&#8348;&#7457; &minus; &rho;&middot;r&#8348;&#8331;&#8321;&#7457;) / (1 &minus; &rho;).
+                  It is deliberately not applied when &rho; is negative (mean reversion, not
+                  smoothing) or at/above 0.5, where the amplification is dominated by estimation
+                  error in &rho; itself.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No smoothing diagnostics available</p>
+          )}
         </CardContent>
       </Card>
 

@@ -19,6 +19,7 @@ import { searchIntervalFundUniverse, reconciledToInsert, type ReconciledFund } f
 import { optimizePortfolio } from "./optimizer";
 import { setupAuth } from "./auth";
 import { requireAuth } from "./requireAuth";
+import { analyzeSmoothing } from "./unsmoothing";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns, calculateAdvancedTailMetrics, calculateComponentRisk, calculateFactorDecomposition, runMonteCarloStress, type HoldingInfo } from "./riskCalculations";
@@ -1457,6 +1458,7 @@ export async function registerRoutes(
       }
 
       const advancedTail = calculateAdvancedTailMetrics(periodReturns, portfolioValues, riskFreeRate, advPeriodsPerYear);
+      const smoothing = analyzeSmoothing(periodReturns, advPeriodsPerYear, riskFreeRate);
       const componentRisk = calculateComponentRisk(holdingInfos, periodReturns, advPeriodsPerYear);
       const factorDecomp = calculateFactorDecomposition(periodReturns, benchmarkReturns, advPeriodsPerYear);
 
@@ -1473,6 +1475,9 @@ export async function registerRoutes(
 
       res.json({
         advancedTail,
+        // The unsmoothed series itself is large and only useful server-side,
+        // so it is dropped from the payload; the diagnostics travel.
+        smoothing: { ...smoothing, unsmoothedReturns: undefined },
         componentRisk,
         factorDecomposition: factorDecomp,
         monteCarloStress: monteCarloResults,
