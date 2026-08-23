@@ -291,10 +291,20 @@ export default function PortfolioBuilderPage() {
     sharpeRatio: number;
     convexity: number;
     description: string;
+    correlation?: {
+      method: "sample" | "shrunk" | "assumed";
+      observations: number;
+      shrinkageIntensity: number;
+      averageCorrelation: number;
+      repaired: boolean;
+      warnings: string[];
+      names: string[];
+      matrix: number[][];
+    };
   } | null>(null);
 
   const optimizeMutation = useMutation({
-    mutationFn: async (data: { goal: string; items: Array<{ name: string; expectedReturn: number; volatility: number; weight: number }> }) => {
+    mutationFn: async (data: { goal: string; items: Array<{ name: string; expectedReturn: number; volatility: number; weight: number; strategyId?: string }> }) => {
       const response = await apiRequest("POST", "/api/optimize-portfolio", data);
       return response.json();
     },
@@ -320,6 +330,9 @@ export default function PortfolioBuilderPage() {
         expectedReturn: parseFloat(item.expectedReturn || "0.05"),
         volatility: parseFloat(item.volatility || "0.15"),
         weight: parseFloat(item.weight) || 0,
+        // Lets the server estimate correlations from this holding's actual
+        // return history instead of assuming a flat 0.3.
+        strategyId: item.strategyId,
       })),
     });
   };
@@ -838,6 +851,29 @@ export default function PortfolioBuilderPage() {
                                 <p className="text-lg font-semibold text-amber-500">{optimizationResult.convexity.toFixed(2)}</p>
                               </div>
                             </div>
+
+                            {optimizationResult.correlation && (
+                              <div className="rounded-lg border p-3 text-sm" data-testid="optimizer-correlation-provenance">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-medium">Correlations</span>
+                                  <span className="text-muted-foreground">
+                                    {optimizationResult.correlation.method === "assumed"
+                                      ? "Assumed 0.30 \u2014 no usable return history"
+                                      : `From ${optimizationResult.correlation.observations} overlapping periods of actual returns`}
+                                  </span>
+                                </div>
+                                {optimizationResult.correlation.method !== "assumed" && (
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    Average pairwise correlation {optimizationResult.correlation.averageCorrelation.toFixed(2)};
+                                    shrunk {(optimizationResult.correlation.shrinkageIntensity * 100).toFixed(0)}% toward that
+                                    average to temper small-sample noise.
+                                  </p>
+                                )}
+                                {optimizationResult.correlation.warnings.map((w, i) => (
+                                  <p key={i} className="mt-1 text-xs text-amber-500">{w}</p>
+                                ))}
+                              </div>
+                            )}
 
                             <div>
                               <h5 className="font-medium mb-2">Optimized Weights</h5>

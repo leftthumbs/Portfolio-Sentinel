@@ -17,6 +17,7 @@ import { analyzeIntervalFund, compareIntervalFunds, type IntervalFundAnalysisOut
 import { validateIntervalFund, generateDataQualityReport } from "./dataValidation";
 import { searchIntervalFundUniverse, reconciledToInsert, type ReconciledFund } from "./intervalFundSources";
 import { optimizePortfolio } from "./optimizer";
+import { buildCorrelationMatrix, type ReturnObservation } from "./correlation";
 import { setupAuth } from "./auth";
 import { requireAuth } from "./requireAuth";
 import { analyzeSmoothing } from "./unsmoothing";
@@ -4178,6 +4179,9 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
       expectedReturn: z.number(),
       volatility: z.number(),
       weight: z.number(),
+      // Optional: when present, the holding's real return history drives the
+      // correlation estimate instead of a flat assumption.
+      strategyId: z.string().optional(),
     })),
   });
 
@@ -4194,8 +4198,39 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
         return res.status(400).json({ message: "No items to optimize" });
       }
 
-      const result = optimizePortfolio(items, goal);
-      res.json(result);
+      // Correlation from actual return history where the holdings carry it.
+      // Keyed by position, so two holdings pointing at the same strategy stay
+      // distinct rows in the matrix.
+      const series = new Map<string, ReturnObservation[]>();
+      await Promise.all(items.map(async (item, i) => {
+        if (!item.strategyId) return;
+        try {
+          const rows = await storage.getStrategyReturns(item.strategyId);
+          if (rows.length > 0) {
+            series.set(String(i), rows.map(r => ({ date: r.date, returnValue: r.returnValue })));
+          }
+        } catch (e) {
+          console.error(`Failed to load returns for strategy ${item.strategyId}:`, e);
+        }
+      }));
+
+      const correlation = buildCorrelationMatrix(items.map((_, i) => String(i)), series);
+      const result = optimizePortfolio(items, goal, correlation.matrix);
+
+      res.json({
+        ...result,
+        correlation: {
+          method: correlation.method,
+          observations: correlation.observations,
+          shrinkageIntensity: correlation.shrinkageIntensity,
+          averageCorrelation: correlation.averageCorrelation,
+          repaired: correlation.repaired,
+          warnings: correlation.warnings,
+          // Name the rows so the client can label a correlation heatmap.
+          names: items.map(i => i.name),
+          matrix: correlation.matrix,
+        },
+      });
     } catch (error: any) {
       console.error("Optimization error:", error);
       res.status(500).json({ message: "Failed to optimize portfolio" });
