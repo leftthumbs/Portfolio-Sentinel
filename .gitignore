@@ -3,3 +3,10 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Captured dataroom material - confidential, never commit
+docsend-captures/
+
+# Python bytecode from .claude/skills scripts
+__pycache__/
+*.pyc
