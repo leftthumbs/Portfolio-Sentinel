@@ -18,6 +18,7 @@ import { validateIntervalFund, generateDataQualityReport } from "./dataValidatio
 import { searchIntervalFundUniverse, reconciledToInsert, type ReconciledFund } from "./intervalFundSources";
 import { optimizePortfolio } from "./optimizer";
 import { setupAuth } from "./auth";
+import { registerReturnStreamRoutes } from "./returnStreamRoutes";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns, calculateAdvancedTailMetrics, calculateComponentRisk, calculateFactorDecomposition, runMonteCarloStress, type HoldingInfo } from "./riskCalculations";
@@ -4724,6 +4725,8 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
       res.status(500).json({ message: "Failed to import fund" });
     }
   });
+
+  registerReturnStreamRoutes(app);
 
   return httpServer;
 }

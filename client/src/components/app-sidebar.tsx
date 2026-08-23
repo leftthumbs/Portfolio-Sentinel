@@ -17,7 +17,8 @@ import {
   Wallet,
   Target,
   GitCompare,
-  Droplets
+  Droplets,
+  LineChart
 } from "lucide-react";
 import {
   Sidebar,
@@ -101,6 +102,11 @@ const navigationItems = [
     title: "Fund Analysis",
     url: "/fund-analysis",
     icon: BarChart3,
+  },
+  {
+    title: "Return Analyzer",
+    url: "/return-analyzer",
+    icon: LineChart,
   },
   {
     title: "Analytics Glossary",
