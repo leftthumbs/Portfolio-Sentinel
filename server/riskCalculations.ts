@@ -352,7 +352,7 @@ export function parametricExpectedShortfall(returns: number[], confidence: numbe
   if (sigma === 0) return 0;
 
   const zAlpha = normalCDFInverse(1 - confidence);
-  const esGaussian = mu + sigma * normalPDF(zAlpha) / (1 - confidence);
+  const esGaussian = mu - sigma * normalPDF(zAlpha) / (1 - confidence);
 
   return esGaussian;
 }
