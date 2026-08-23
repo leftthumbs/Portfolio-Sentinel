@@ -18,6 +18,7 @@ import { validateIntervalFund, generateDataQualityReport } from "./dataValidatio
 import { searchIntervalFundUniverse, reconciledToInsert, type ReconciledFund } from "./intervalFundSources";
 import { optimizePortfolio } from "./optimizer";
 import { setupAuth } from "./auth";
+import { requireAuth } from "./requireAuth";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns, calculateAdvancedTailMetrics, calculateComponentRisk, calculateFactorDecomposition, runMonteCarloStress, type HoldingInfo } from "./riskCalculations";
@@ -148,7 +149,11 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   setupAuth(app);
-  
+
+  // Every /api route below this line requires a session. Public endpoints are
+  // allowlisted inside requireAuth itself.
+  app.use(requireAuth);
+
   // Ensure default user exists on startup
   await ensureDefaultUser();
   
