@@ -206,6 +206,25 @@ export default function PortfolioBuilderPage() {
     enabled: !!selectedPortfolioId,
   });
 
+  const { data: liquidityLadder } = useQuery<{
+    totalValue: number;
+    buckets: { label: string; minDays: number; maxDays: number; value: number; weight: number }[];
+    cumulative: { days: number; label: string; fraction: number; value: number }[];
+    weightedAverageDaysToLiquidity: number;
+    daysToFullPortfolioLiquidation: number;
+    illiquidFraction: number;
+    assumedHoldings: string[];
+    warnings: string[];
+  }>({
+    queryKey: ["/api/custom-portfolios", selectedPortfolioId, "liquidity"],
+    queryFn: async () => {
+      const res = await fetch(`/api/custom-portfolios/${selectedPortfolioId}/liquidity`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load liquidity ladder");
+      return res.json();
+    },
+    enabled: !!selectedPortfolioId,
+  });
+
   const { data: treasuryRate } = useQuery<{ rate: number; date: string; source: string }>({
     queryKey: ["/api/treasury-rates/3month"],
     staleTime: 24 * 60 * 60 * 1000, // Cache for 24 hours
@@ -1339,6 +1358,96 @@ export default function PortfolioBuilderPage() {
                   </Table>
                 </CardContent>
               </Card>
+
+              {liquidityLadder && liquidityLadder.totalValue > 0 && (
+                <Card data-testid="card-liquidity-ladder">
+                  <CardHeader>
+                    <CardTitle>Liquidity Ladder</CardTitle>
+                    <CardDescription>
+                      When this book turns into cash, from each holding&apos;s stated redemption
+                      terms. Notice periods and gates are applied; manager behaviour under stress
+                      is not modelled.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      <div className="p-4 border rounded-lg">
+                        <span className="text-sm font-medium text-muted-foreground">Realizable in 90 days</span>
+                        <p className="text-2xl font-semibold">
+                          {((liquidityLadder.cumulative.find((c) => c.days === 90)?.fraction ?? 0) * 100).toFixed(0)}%
+                        </p>
+                      </div>
+                      <div className="p-4 border rounded-lg">
+                        <span className="text-sm font-medium text-muted-foreground">Beyond one year</span>
+                        <p className="text-2xl font-semibold">
+                          {(liquidityLadder.illiquidFraction * 100).toFixed(0)}%
+                        </p>
+                      </div>
+                      <div className="p-4 border rounded-lg">
+                        <span className="text-sm font-medium text-muted-foreground">Full exit</span>
+                        <p className="text-2xl font-semibold">
+                          {(liquidityLadder.daysToFullPortfolioLiquidation / 365).toFixed(1)}
+                          <span className="text-sm font-normal text-muted-foreground"> years</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h5 className="font-medium mb-3">Weight by time to first redemption</h5>
+                      <div className="space-y-2">
+                        {liquidityLadder.buckets.map((b) => (
+                          <div
+                            key={b.label}
+                            className="flex items-center gap-3"
+                            title={`${b.label}: ${(b.weight * 100).toFixed(1)}% of the portfolio`}
+                          >
+                            <span className="w-28 shrink-0 text-sm text-muted-foreground">{b.label}</span>
+                            <div className="h-5 flex-1 rounded bg-muted overflow-hidden">
+                              <div
+                                className="h-full rounded bg-primary"
+                                style={{ width: `${Math.max(b.weight * 100, b.weight > 0 ? 1 : 0)}%` }}
+                              />
+                            </div>
+                            <span className="w-14 shrink-0 text-right text-sm tabular-nums">
+                              {(b.weight * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <h5 className="font-medium mb-3">Cumulative realizable</h5>
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Horizon</TableHead>
+                            <TableHead className="text-right">Share of portfolio</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {liquidityLadder.cumulative.map((c) => (
+                            <TableRow key={c.days}>
+                              <TableCell>{c.label}</TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {(c.fraction * 100).toFixed(1)}%
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+
+                    {liquidityLadder.warnings.length > 0 && (
+                      <div className="space-y-1 border-t pt-4">
+                        {liquidityLadder.warnings.map((w, i) => (
+                          <p key={i} className="text-sm text-amber-500">{w}</p>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
 
               {latestBacktest && (
                 <>

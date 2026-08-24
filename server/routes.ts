@@ -18,6 +18,7 @@ import { validateIntervalFund, generateDataQualityReport } from "./dataValidatio
 import { searchIntervalFundUniverse, reconciledToInsert, type ReconciledFund } from "./intervalFundSources";
 import { optimizePortfolio } from "./optimizer";
 import { buildCorrelationMatrix, type ReturnObservation } from "./correlation";
+import { buildLiquidityLadder, type LiquidityTerms } from "./liquidity";
 import { setupAuth } from "./auth";
 import { requireAuth } from "./requireAuth";
 import { analyzeSmoothing } from "./unsmoothing";
@@ -3840,6 +3841,48 @@ Return ONLY a valid JSON object with the extracted fields. For any field not fou
     } catch (error: any) {
       console.error("Get custom portfolio error:", error);
       res.status(500).json({ message: "Failed to fetch custom portfolio" });
+    }
+  });
+
+  app.get("/api/custom-portfolios/:id/liquidity", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const portfolio = await storage.getCustomPortfolio(id);
+      if (!portfolio) {
+        return res.status(404).json({ message: "Portfolio not found" });
+      }
+
+      const items = await storage.getCustomPortfolioItems(id);
+
+      // Redemption terms live on the strategy, not the portfolio line, so a
+      // holding entered by hand has none and the ladder treats it as illiquid.
+      const terms: LiquidityTerms[] = await Promise.all(items.map(async (item) => {
+        const weight = parseFloat(item.weight) || 0;
+        const base: LiquidityTerms = { name: item.name, value: weight };
+        if (!item.strategyId) return base;
+
+        try {
+          const strategy = await storage.getStrategy(item.strategyId);
+          if (!strategy) return base;
+          return {
+            ...base,
+            lockupMonths: strategy.lockupPeriod ?? null,
+            redemptionFrequency: strategy.redemptionFrequency ?? null,
+            redemptionNoticeDays: strategy.redemptionNotice ?? null,
+            gateProvision: strategy.gateProvision != null ? parseFloat(strategy.gateProvision) : null,
+            fundLifeYears: strategy.fundLifeYears ?? null,
+            vintageYear: strategy.vintageYear ?? null,
+          };
+        } catch (e) {
+          console.error(`Failed to load strategy ${item.strategyId} for liquidity:`, e);
+          return base;
+        }
+      }));
+
+      res.json(buildLiquidityLadder(terms));
+    } catch (error: any) {
+      console.error("Liquidity ladder error:", error);
+      res.status(500).json({ message: "Failed to build liquidity ladder" });
     }
   });
 
