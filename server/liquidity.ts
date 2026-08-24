@@ -77,6 +77,11 @@ export interface HoldingLiquidity {
   isClosedEnd: boolean;
   /** Terms were absent, so the holding was treated as illiquid. */
   assumed: boolean;
+  /**
+   * Set when a holding states both a wind-up date and ongoing redemption
+   * terms, and the two disagree about when cash is available.
+   */
+  termsConflict: string | null;
 }
 
 const DAYS_PER_MONTH = 30;
@@ -97,11 +102,33 @@ export function analyzeHoldingLiquidity(
   const lockupDays = Math.max(0, (terms.lockupMonths ?? 0) * DAYS_PER_MONTH);
   const noticeDays = Math.max(0, terms.redemptionNoticeDays ?? 0);
 
-  // Closed-end: cash returns when the fund winds up, whatever else is stated.
+  // Closed-end: cash returns when the fund winds up.
+  //
+  // Funds routinely state both a wind-up date and ongoing redemption terms,
+  // and the two disagree. Neither can be dismissed from the data alone — the
+  // redemption terms may be a genuine early-exit facility or vestigial boiler-
+  // plate — so take whichever date is later and flag the disagreement. Picking
+  // the wind-up date unconditionally is not the conservative choice it looks
+  // like: a lockup running past it makes the redemption path the slower one.
   if (terms.fundLifeYears && terms.vintageYear) {
     const endYear = terms.vintageYear + terms.fundLifeYears;
     const end = new Date(Date.UTC(endYear, 0, 1));
-    const days = Math.max(0, Math.round((end.getTime() - asOf.getTime()) / 86400000));
+    const windUpDays = Math.max(0, Math.round((end.getTime() - asOf.getTime()) / 86400000));
+
+    let days = windUpDays;
+    let termsConflict: string | null = null;
+
+    if (frequency !== "none") {
+      const windowDays = WINDOW_DAYS[frequency];
+      const threshold = Math.max(lockupDays, noticeDays);
+      const redemptionDays = Math.max(1, Math.ceil(threshold / windowDays)) * windowDays;
+      if (redemptionDays !== windUpDays) {
+        days = Math.max(windUpDays, redemptionDays);
+        termsConflict =
+          `States a ${terms.fundLifeYears}-year life ending ${endYear} (${windUpDays}d) and ${terms.redemptionFrequency} redemption (${redemptionDays}d). Taking the later.`;
+      }
+    }
+
     return {
       name: terms.name,
       value: terms.value,
@@ -110,6 +137,7 @@ export function analyzeHoldingLiquidity(
       windowsRequired: 1,
       isClosedEnd: true,
       assumed: false,
+      termsConflict,
     };
   }
 
@@ -124,6 +152,7 @@ export function analyzeHoldingLiquidity(
       windowsRequired: 1,
       isClosedEnd: false,
       assumed: true,
+      termsConflict: null,
     };
   }
 
@@ -152,6 +181,7 @@ export function analyzeHoldingLiquidity(
     windowsRequired,
     isClosedEnd: false,
     assumed: false,
+    termsConflict: null,
   };
 }
 
@@ -286,6 +316,11 @@ export function buildLiquidityLadder(
     warnings.push(
       `${(illiquidFraction * 100).toFixed(0)}% of the portfolio cannot be realized within a year.`,
     );
+  }
+
+  const conflicted = holdings.filter((h) => h.termsConflict);
+  for (const h of conflicted) {
+    warnings.push(`${h.name}: ${h.termsConflict}`);
   }
 
   const gated = holdings.filter((h) => h.windowsRequired > 1);

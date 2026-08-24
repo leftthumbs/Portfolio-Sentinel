@@ -15,6 +15,19 @@ declare global {
 
 const scryptAsync = promisify(scrypt);
 
+/**
+ * Strips the credential before a user is serialized to a client.
+ *
+ * Passport puts the whole row on req.user, so returning it directly sends the
+ * scrypt hash and its salt to the browser on every login and every session
+ * check. Nothing on the client reads the field, and a hash that never leaves
+ * the server cannot be taken offline and attacked.
+ */
+export function publicUser(user: SelectUser): Omit<SelectUser, "password"> {
+  const { password, ...rest } = user;
+  return rest;
+}
+
 async function hashPassword(password: string) {
   const salt = randomBytes(16).toString("hex");
   const buf = (await scryptAsync(password, salt, 64)) as Buffer;
@@ -67,7 +80,7 @@ export function setupAuth(app: Express) {
   });
 
   app.post("/api/login", passport.authenticate("local"), (req, res) => {
-    res.status(200).json(req.user);
+    res.status(200).json(publicUser(req.user as SelectUser));
   });
 
   app.post("/api/logout", (req, res, next) => {
@@ -79,7 +92,7 @@ export function setupAuth(app: Express) {
 
   app.get("/api/user", (req, res) => {
     if (!req.isAuthenticated()) return res.sendStatus(401);
-    res.json(req.user);
+    res.json(publicUser(req.user as SelectUser));
   });
 
   app.post("/api/user/change-password", async (req, res) => {

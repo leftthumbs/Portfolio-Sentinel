@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      # The client is built with `jsx: preserve`, so tsc does not fully
+      # validate JSX. The build does, and it has caught what tsc did not.
+      - name: Build client
+        run: npx vite build
+
+      # Typecheck is reported but not enforced: the repo carries 34 pre-existing
+      # errors, mostly Drizzle inference in routes.ts and dead replit_integrations
+      # code. Failing on them would make CI red from the first run and train
+      # everyone to ignore it. Turn this into a gate once the count reaches zero.
+      - name: Typecheck (informational)
+        run: npx tsc --noEmit || true
+        continue-on-error: true

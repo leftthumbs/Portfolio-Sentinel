@@ -106,6 +106,45 @@ describe("analyzeHoldingLiquidity", () => {
     expect(h.daysToFirstRedemption).toBeLessThan(6 * 365 + 3);
   });
 
+  // Real fund records routinely state both, and they disagree. Picking the
+  // wind-up date unconditionally is not conservative: a lockup running past it
+  // makes the redemption path the slower one, and the ladder must not report
+  // cash arriving sooner than the stricter constraint allows.
+  it("takes the later date when a wind-up and a lockup disagree", () => {
+    // Wind-up in ~1.4 years, but a 36-month lockup on quarterly dealing.
+    const h = analyzeHoldingLiquidity(terms({
+      vintageYear: 2021, fundLifeYears: 7,
+      redemptionFrequency: "quarterly", lockupMonths: 36, redemptionNoticeDays: 90,
+    }), AS_OF);
+    expect(h.daysToFirstRedemption).toBe(1092); // ceil(1080/91) * 91
+    expect(h.termsConflict).toMatch(/Taking the later/);
+  });
+
+  it("keeps the wind-up date when it is the later of the two", () => {
+    const h = analyzeHoldingLiquidity(terms({
+      vintageYear: 2023, fundLifeYears: 10,
+      redemptionFrequency: "quarterly", lockupMonths: 12, redemptionNoticeDays: 30,
+    }), AS_OF);
+    // 2033-01-01 is far beyond a 12-month lockup.
+    expect(h.daysToFirstRedemption).toBeGreaterThan(2000);
+    expect(h.isClosedEnd).toBe(true);
+  });
+
+  it("reports no conflict when a closed-end fund states no redemption terms", () => {
+    const h = analyzeHoldingLiquidity(
+      terms({ vintageYear: 2023, fundLifeYears: 10 }), AS_OF);
+    expect(h.termsConflict).toBeNull();
+  });
+
+  it("surfaces the conflict in the ladder warnings", () => {
+    const ladder = buildLiquidityLadder([{
+      name: "Ares Senior Secured", value: 100,
+      vintageYear: 2021, fundLifeYears: 7,
+      redemptionFrequency: "quarterly", lockupMonths: 36, redemptionNoticeDays: 90,
+    }], AS_OF);
+    expect(ladder.warnings.join(" ")).toMatch(/Ares Senior Secured:.*Taking the later/);
+  });
+
   it("gives a closed-end fund past its life immediate liquidity rather than a negative", () => {
     const h = analyzeHoldingLiquidity(
       terms({ vintageYear: 2010, fundLifeYears: 5 }), AS_OF);
