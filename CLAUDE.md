@@ -135,9 +135,10 @@ every request returns 400. Every call addresses the drive explicitly via
 Unconfigured, both return 503 with a message naming the missing variables.
 
 ## Known Constraints
-- **The app will not start without `OPENAI_API_KEY`.** `memoGenerator.ts`
-  constructs the client at module load, so a missing key stops the process
-  before it can serve anything, including pages that never touch AI.
+- **AI drafting is the only thing that needs `OPENAI_API_KEY`.** The client is
+  built on first use, so the app starts and every non-AI page works without a
+  key; the failure lands on the request that needs one. `check-setup` reports
+  it as optional.
 - **`routes.ts` is ~4,800 lines** and holds all 107 API handlers. Split it by
   domain as handlers are touched rather than in one move.
 - **23 pre-existing type errors**, all Drizzle inference on query results in

@@ -45,7 +45,7 @@ async function checkEnvFile() {
   if (existsSync(".env.example")) {
     copyFileSync(".env.example", ".env");
     add("Settings file", "fail", ".env did not exist, so a blank one was created from the template",
-        "Open .env and fill in DATABASE_URL, SESSION_SECRET and OPENAI_API_KEY, then run this again.");
+        "Open .env and fill in DATABASE_URL and SESSION_SECRET, then run this again.");
     return;
   }
   add("Settings file", "fail", "Neither .env nor .env.example is present",
@@ -104,8 +104,9 @@ function checkSessionSecret() {
 function checkOpenAI() {
   const key = process.env.OPENAI_API_KEY;
   if (!key) {
-    add("AI memo drafting", "fail", "OPENAI_API_KEY is not set — the app will not start at all without it",
-        "Get a key from platform.openai.com. It is needed even for pages that never use AI, because the client is built when the app starts.");
+    add("AI memo drafting", "warn", "Not configured — memo drafting and document extraction are switched off",
+        "Optional. The rest of the app runs without it. Key from platform.openai.com when you want AI drafting.",
+        false);
   } else if (!key.startsWith("sk-")) {
     add("AI memo drafting", "warn", "OPENAI_API_KEY does not start with sk-, which is unusual",
         "Check you copied the API key rather than an organisation or project id.");

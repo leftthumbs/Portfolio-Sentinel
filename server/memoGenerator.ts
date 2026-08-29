@@ -1,10 +1,29 @@
 import OpenAI from "openai";
 import type { DataRoomDocument, Holding, Portfolio, RiskMetrics, MemoTemplateType } from "@shared/schema";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: process.env.OPENAI_BASE_URL,
-});
+// Built on first use, not at import. Constructing it here threw when
+// OPENAI_API_KEY was unset, and because routes.ts imports this module the
+// throw happened during startup -- so a missing key stopped the whole app,
+// including the risk, performance and portfolio pages that never call an
+// AI provider at all. Deferring it means the failure lands on the one
+// request that needs a key, with a message naming what is missing.
+let client: OpenAI | null = null;
+
+function getClient(): OpenAI {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error(
+      "OPENAI_API_KEY is not set, so AI drafting is unavailable. " +
+      "Everything else in the app works without it.",
+    );
+  }
+  if (!client) {
+    client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      baseURL: process.env.OPENAI_BASE_URL,
+    });
+  }
+  return client;
+}
 
 interface MemoContext {
   portfolio: Portfolio;
@@ -805,7 +824,7 @@ ${template}
 
 Produce the complete memorandum now, ensuring it meets institutional investment standards.`;
 
-  const response = await openai.chat.completions.create({
+  const response = await getClient().chat.completions.create({
     model: "gpt-5.2",
     messages: [
       { role: "system", content: systemPrompt },
@@ -855,7 +874,7 @@ Provide:
 3. Financial Metrics: [any numbers, returns, values mentioned]
 4. Investment Implications: [what this means for investment decisions]`;
 
-  const response = await openai.chat.completions.create({
+  const response = await getClient().chat.completions.create({
     model: "gpt-5.2",
     messages: [
       { role: "system", content: systemPrompt },
