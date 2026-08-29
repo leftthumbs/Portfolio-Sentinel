@@ -215,20 +215,42 @@ export const HYPOTHETICAL_SCENARIOS: ScenarioDefinition[] = [
 
 // ─── Math Utilities ─────────────────────────────────────────────────────────
 
-function randomNormal(): number {
+/**
+ * Deterministic PRNG (mulberry32) driving the Monte Carlo draws.
+ *
+ * Seeded from the clock, the same portfolio and scenario produced different
+ * percentiles on every run, so a stress number shown to an investment
+ * committee could not be reproduced afterwards. It also made the simulation
+ * untestable beyond loose statistical bounds. Callers can override the seed
+ * to explore sampling variation deliberately.
+ */
+export const DEFAULT_SIMULATION_SEED = 0x5712;
+
+function makeRandom(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function randomNormal(random: () => number): number {
   let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while (u === 0) u = random();
+  while (v === 0) v = random();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
 /** Student-t distributed random variable (for fat tails) */
-function randomStudentT(degreesOfFreedom: number): number {
+function randomStudentT(degreesOfFreedom: number, random: () => number): number {
   // Use the ratio of normal / sqrt(chi-squared/df) approach
-  const z = randomNormal();
+  const z = randomNormal(random);
   let chiSq = 0;
   for (let i = 0; i < degreesOfFreedom; i++) {
-    const n = randomNormal();
+    const n = randomNormal(random);
     chiSq += n * n;
   }
   return z / Math.sqrt(chiSq / degreesOfFreedom);
@@ -489,15 +511,23 @@ export class ScenarioEngine {
     // Component VaR (approximate: contribution of each factor to portfolio variance)
     const componentVaR = this.computeComponentVaR(holdings, scenario.shocks);
 
-    // Parametric VaR (using portfolio vol under stressed conditions)
+    // Parametric VaR and CVaR, both as positive loss magnitudes measured from
+    // zero rather than from the scenario's own mean.
+    //
+    // VaR previously ignored totalImpact while CVaR added it, which made the
+    // two incomparable: CVaR came out below VaR in every preset scenario,
+    // impossible for a coherent risk measure, and it fell as the scenario got
+    // worse because the negative impact cancelled the positive tail term
+    // before Math.abs hid the crossover. Subtracting the impact instead makes
+    // a worse scenario report a worse loss, and keeps CVaR >= VaR by
+    // construction since phi(z)/alpha exceeds z at both confidence levels.
     const stressedVol = this.estimateStressedVolatility(holdings, scenario);
-    const parametricVaR95 = 1.645 * stressedVol;
-    const parametricVaR99 = 2.326 * stressedVol;
-    // CVaR approximation (Gaussian): CVaR = mu + sigma * phi(z_alpha) / (1 - alpha)
-    const phi95 = 0.10314; // phi(1.645) ≈ standard normal PDF at z=1.645
-    const phi99 = 0.02665; // phi(2.326) ≈ standard normal PDF at z=2.326
-    const cvar95 = totalImpact + stressedVol * phi95 / 0.05;
-    const cvar99 = totalImpact + stressedVol * phi99 / 0.01;
+    const phi95 = 0.10314; // phi(1.645), standard normal PDF at z=1.645
+    const phi99 = 0.02665; // phi(2.326)
+    const parametricVaR95 = 1.645 * stressedVol - totalImpact;
+    const parametricVaR99 = 2.326 * stressedVol - totalImpact;
+    const cvar95 = (phi95 / 0.05) * stressedVol - totalImpact;
+    const cvar99 = (phi99 / 0.01) * stressedVol - totalImpact;
 
     return {
       scenarioName: scenario.name,
@@ -508,10 +538,10 @@ export class ScenarioEngine {
       impactAmount,
       portfolioValue,
       stressedValue: portfolioValue * (1 + totalImpact),
-      parametricVaR95: Math.abs(parametricVaR95),
-      parametricVaR99: Math.abs(parametricVaR99),
-      cvar95: Math.abs(cvar95),
-      cvar99: Math.abs(cvar99),
+      parametricVaR95,
+      parametricVaR99,
+      cvar95,
+      cvar99,
       componentVaR,
       factorImpacts,
       assetImpacts,
@@ -538,6 +568,8 @@ export class ScenarioEngine {
       fatTails?: boolean;
       degreesOfFreedom?: number;      // for Student-t (lower = fatter tails, e.g. 5)
       horizonDays?: number;
+      /** Override to explore sampling variation; fixed by default so runs reproduce. */
+      seed?: number;
     } = {}
   ): ScenarioResult {
     const {
@@ -545,7 +577,10 @@ export class ScenarioEngine {
       fatTails = true,
       degreesOfFreedom = 5,
       horizonDays = 252,
+      seed = DEFAULT_SIMULATION_SEED,
     } = config;
+
+    const random = makeRandom(seed);
 
     const simulatedReturns: number[] = [];
     const nFactors = this.factors.length;
@@ -554,7 +589,7 @@ export class ScenarioEngine {
     for (let sim = 0; sim < numSimulations; sim++) {
       // Generate independent random vector
       const z = new Array(nFactors).fill(0).map(() =>
-        fatTails ? randomStudentT(degreesOfFreedom) : randomNormal()
+        fatTails ? randomStudentT(degreesOfFreedom, random) : randomNormal(random)
       );
 
       // Apply Cholesky to get correlated shocks
@@ -856,7 +891,15 @@ export function holdingsToPortfolioHoldings(
 }
 
 function normalizeAssetClass(assetClass: string): string {
-  const lower = (assetClass || "").toLowerCase();
+  // Match on the singular stem. Every branch below tests for "equity" and
+  // "stock", so a book labelled "US Equities" or "Global Equities" — the more
+  // common institutional spelling — fell through to "Other" and was stressed
+  // with an equity beta of 0.30 instead of 1.00, understating an equity shock
+  // by roughly seventy percent.
+  const lower = (assetClass || "")
+    .toLowerCase()
+    .replace(/equities/g, "equity")
+    .replace(/stocks/g, "stock");
   if (lower.includes("us equity") || lower.includes("us stock") || lower.includes("domestic equity")) return "US Equity";
   if (lower.includes("international") || lower.includes("intl") || lower.includes("developed")) return "International Equity";
   if (lower.includes("emerging") || lower.includes("em ")) return "Emerging Markets";
