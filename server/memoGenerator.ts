@@ -1,5 +1,6 @@
 import OpenAI from "openai";
-import type { DataRoomDocument, Holding, Portfolio, RiskMetrics, MemoTemplateType } from "@shared/schema";
+import type { DataRoomDocument, Holding, Portfolio, MemoTemplateType } from "@shared/schema";
+import type { DerivedRisk } from "./memoPackage";
 
 // Built on first use, not at import. Constructing it here threw when
 // OPENAI_API_KEY was unset, and because routes.ts imports this module the
@@ -28,7 +29,7 @@ function getClient(): OpenAI {
 interface MemoContext {
   portfolio: Portfolio;
   holdings: Holding[];
-  riskMetrics: RiskMetrics | null;
+  riskMetrics: DerivedRisk | null;
   documents: DataRoomDocument[];
   templateType?: MemoTemplateType;
 }
@@ -728,15 +729,28 @@ export async function generateInvestmentMemo(context: MemoContext): Promise<{ ti
     `- ${h.fundName} (${h.assetClass}): $${parseFloat(h.marketValue).toLocaleString()} (${parseFloat(h.allocation).toFixed(1)}% allocation, YTD: ${h.returnYtd ? (parseFloat(h.returnYtd) * 100).toFixed(1) : 'N/A'}%)`
   ).join("\n");
 
+  // These arrive derived from performance_history. They used to be read from
+  // the risk_metrics table, which only the seeder writes -- so every memo
+  // quoted the same fixed demo figures (Sharpe 1.42, volatility 12.45%)
+  // whatever the portfolio had actually done. Beta and alpha are gone from
+  // this summary because they need a benchmark, and printing `null` for them
+  // invited the model to invent a value.
+  const asPct = (v: number | null) => (v === null ? "not available" : `${(v * 100).toFixed(2)}%`);
+  const asRatio = (v: number | null) => (v === null ? "not available" : v.toFixed(2));
+
   const riskSummary = riskMetrics ? `
-Risk Metrics:
-- Sharpe Ratio: ${riskMetrics.sharpeRatio}
-- Volatility: ${(parseFloat(riskMetrics.volatility || "0") * 100).toFixed(2)}%
-- VaR (95%): ${(parseFloat(riskMetrics.var95 || "0") * 100).toFixed(2)}%
-- Max Drawdown: ${(parseFloat(riskMetrics.maxDrawdown || "0") * 100).toFixed(2)}%
-- Beta: ${riskMetrics.beta}
-- Alpha: ${riskMetrics.alpha}
-` : "Risk metrics not available.";
+Risk Metrics, computed from ${riskMetrics.observations} ${riskMetrics.periodLabel} observations:
+- Annualized Return: ${asPct(riskMetrics.annualizedReturn)}
+- Annualized Volatility: ${asPct(riskMetrics.annualizedVolatility)}
+- Sharpe Ratio: ${asRatio(riskMetrics.sharpeRatio)}
+- Sortino Ratio: ${asRatio(riskMetrics.sortinoRatio)}
+- Max Drawdown: ${asPct(-riskMetrics.maxDrawdown)}
+- VaR (95%, historical): ${asPct(riskMetrics.historicalVaR95)}
+- Expected Shortfall (95%): ${asPct(riskMetrics.expectedShortfall95)}
+
+Do not state a risk figure that is not in this list. Beta and alpha are not
+available for this portfolio; say so rather than estimating either.
+` : "Risk metrics not available. Do not estimate or state any risk figure.";
 
   const template = templateType === "everest_investment_summary" 
     ? EVEREST_INVESTMENT_SUMMARY_TEMPLATE 

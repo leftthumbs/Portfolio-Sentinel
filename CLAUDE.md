@@ -55,7 +55,7 @@ Passport.js local sessions with scrypt hashing. Vite for builds.
 - **Analytics engine**: ten modules, all reachable from `routes.ts` and all
   covered by tests — `riskCalculations`, `benchmarkCalculations`,
   `scenarioEngine`, `unsmoothing`, `correlation`, `liquidity`, `optimizer`,
-  `backtester`, `intervalFundAnalyzer`, `dataValidation`.
+  `backtester`, `intervalFundAnalyzer`, `dataValidation`, `memoPackage`.
 - **Cadence awareness**: every annualized metric detects data frequency via
   `detectPeriodsPerYear()` rather than assuming 252 trading days. Monthly
   fund-of-funds data annualized at 252 overstates Sharpe by roughly √21.
@@ -63,7 +63,7 @@ Passport.js local sessions with scrypt hashing. Vite for builds.
 ## Commands
 ```
 npm run dev        # development server
-npm test           # 359 tests
+npm test           # 440 tests
 npm run check      # typecheck (23 pre-existing errors, all in routes.ts)
 npm run build      # production build
 npm run db:push    # apply schema to the database
@@ -84,6 +84,27 @@ a hosting platform's own settings are never overridden by the file.
 Required: `DATABASE_URL`, `SESSION_SECRET`, `OPENAI_API_KEY`.
 Optional: `GMAIL_USER` and `GMAIL_APP_PASSWORD`, the four OneDrive variables,
 `ALPHA_VANTAGE_API_KEY`, `FRED_API_KEY`, `OPENFIGI_API_KEY`.
+
+## Memo Writing
+
+Two paths, and the export is the one in use.
+
+`GET /api/memos/package` returns one Markdown file holding everything a memo
+needs: holdings with allocations and returns, an asset-class breakdown, risk
+and performance derived from `performance_history`, stress test results,
+the document inventory and any extracted text. It needs no AI provider, so it
+works on a checkout with nothing but a database. The file is written to be
+handed to an assistant that already holds the house template -- the
+`dowd-ic-memo-formatter` and `cpf-memo-formatter` skills encode those, and the
+built-in templates in `memoGenerator.ts` do not.
+
+Every figure in that file names what it was derived from, and anything that
+could not be derived is stated as missing rather than dropped. That is
+deliberate: the file exists so a memo cannot quote an assumption as a
+measurement.
+
+`POST /api/memos/generate` is the older in-app path. It needs `OPENAI_API_KEY`
+and writes to the generic built-in templates.
 
 ## Document Import
 
@@ -144,8 +165,12 @@ Unconfigured, both return 503 with a message naming the missing variables.
 - **23 pre-existing type errors**, all Drizzle inference on query results in
   `routes.ts`. CI reports them without failing; make it a gate once they reach
   zero.
-- **Untested**: the route handlers, `storage.ts`, memo generation, and the
-  ingest and vendor adapters. Every module that produces a number is covered.
+- **`risk_metrics` is written only by the seeder.** Nothing computes into it,
+  so any reader gets fixed demo values. `/api/risk` and both memo paths derive
+  from `performance_history` instead. Do not reintroduce a reader of that table
+  without first making something write real values to it.
+- **Untested**: the route handlers, `storage.ts`, and the ingest and vendor
+  adapters. Every module that produces a number is covered.
 
 ## External Dependencies
 OpenAI (memo generation), Alpha Vantage (prices and ETF returns), FRED

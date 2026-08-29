@@ -24,6 +24,12 @@ import { requireAuth } from "./requireAuth";
 import { analyzeSmoothing } from "./unsmoothing";
 import { getTickerWithMetrics, getHistoricalReturns, calculateAnnualizedMetrics } from "./tickerLookup";
 import { get3MonthTBillRate } from "./treasuryRates";
+import {
+  buildMemoPackage,
+  deriveRisk,
+  detectPeriodsPerYear,
+  memoPackageFilename,
+} from "./memoPackage";
 import { calculateBenchmarkMetrics, generateSyntheticBenchmarkReturns, calculateAdvancedTailMetrics, calculateComponentRisk, calculateFactorDecomposition, runMonteCarloStress, type HoldingInfo } from "./riskCalculations";
 import { refreshBenchmarkReturns, refreshSingleBenchmark, isRealTicker } from "./benchmarkDataService";
 import {
@@ -52,19 +58,6 @@ import {
 const MEMOS_DIR = path.join(process.cwd(), "generated_memos");
 if (!fs.existsSync(MEMOS_DIR)) {
   fs.mkdirSync(MEMOS_DIR, { recursive: true });
-}
-
-function detectPeriodsPerYear(dates: (string | Date)[]): number {
-  if (dates.length < 2) return 12;
-  const sorted = dates.map(d => new Date(d).getTime()).sort((a, b) => a - b);
-  const intervals: number[] = [];
-  for (let i = 1; i < Math.min(sorted.length, 20); i++) {
-    intervals.push((sorted[i] - sorted[i - 1]) / (1000 * 60 * 60 * 24));
-  }
-  const avgDays = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-  if (avgDays > 60) return 4;
-  if (avgDays > 15) return 12;
-  return 252;
 }
 
 const STRATEGY_FILES_DIR = path.join(process.cwd(), "strategy_files");
@@ -2183,6 +2176,56 @@ export async function registerRoutes(
     }
   });
 
+  // Exports everything a memo needs as one Markdown file, for writing the memo
+  // in an assistant that already holds the house template. Costs nothing to
+  // run and needs no AI provider configured -- unlike /api/memos/generate,
+  // which needs a key and writes to a generic built-in template.
+  app.get("/api/memos/package", async (req, res) => {
+    try {
+      const folderId = typeof req.query.folderId === "string" ? req.query.folderId : null;
+      const portfolioId = (req.query.portfolioId as string) || await getDefaultPortfolioId();
+
+      const [portfolio, holdings, performance, stressTests, allDocuments] =
+        await Promise.all([
+          storage.getPortfolio(portfolioId),
+          storage.getHoldings(portfolioId),
+          storage.getPerformanceHistory(portfolioId),
+          storage.getStressTests(portfolioId),
+          storage.getDataRoomDocuments(portfolioId),
+        ]);
+
+      if (!portfolio) {
+        return res.status(404).json({ message: "Portfolio not found" });
+      }
+
+      const documents = folderId
+        ? allDocuments.filter((doc) => doc.folderId === folderId)
+        : allDocuments;
+
+      const rateData = await get3MonthTBillRate();
+      const asOf = new Date();
+
+      const markdown = buildMemoPackage({
+        portfolio,
+        holdings,
+        performance,
+        stressTests,
+        documents,
+        riskFreeRate: rateData.rate,
+        riskFreeRateSource: rateData.source,
+        asOf,
+      });
+
+      const filename = memoPackageFilename(portfolio.name, asOf);
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.send(markdown);
+    } catch (error) {
+      console.error("Memo package error:", error);
+      res.status(500).json({ message: "Failed to build memo package" });
+    }
+  });
+
   app.get("/api/memos/:id", async (req, res) => {
     try {
       const memo = await storage.getInvestmentMemo(req.params.id);
@@ -2209,12 +2252,17 @@ export async function registerRoutes(
       
       const portfolioId = await getDefaultPortfolioId();
       
-      const [portfolio, holdings, riskMetrics, allDocuments] = await Promise.all([
+      // Risk figures are derived from performance_history here, not read from
+      // the risk_metrics table: only the seeder writes that table, so reading
+      // it put fixed demo values into every memo.
+      const [portfolio, holdings, performance, allDocuments] = await Promise.all([
         storage.getPortfolio(portfolioId),
         storage.getHoldings(portfolioId),
-        storage.getRiskMetrics(portfolioId),
+        storage.getPerformanceHistory(portfolioId),
         storage.getDataRoomDocuments(portfolioId),
       ]);
+      const memoRateData = await get3MonthTBillRate();
+      const riskMetrics = deriveRisk(performance, memoRateData.rate);
 
       if (!portfolio) {
         return res.status(404).json({ message: "Portfolio not found" });
@@ -2233,7 +2281,7 @@ export async function registerRoutes(
       const { title, content, templateType: usedTemplate } = await generateInvestmentMemo({
         portfolio,
         holdings,
-        riskMetrics: riskMetrics || null,
+        riskMetrics,
         documents,
         templateType,
       });
