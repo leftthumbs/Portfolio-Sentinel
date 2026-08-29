@@ -89,19 +89,24 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
+  // One port serves both the API and the client. PORT overrides it; a hosting
+  // platform usually sets that itself.
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    () => {
-      log(`serving on port ${port}`);
-    },
-  );
+
+  // Bind every interface when deployed, but only this machine in development.
+  // The dev server serves real portfolio data behind a session cookie, and
+  // nothing on the local network has any business reaching it. HOST overrides.
+  const host =
+    process.env.HOST ||
+    (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1");
+
+  // No reusePort. It is a Linux and BSD socket option: Windows rejects it with
+  // ENOTSUP and the process dies after seeding, before serving anything. It
+  // also buys a single-process server nothing, and lets a second accidental
+  // `npm run dev` bind the same port silently and take half the requests --
+  // whereas without it the second one fails loudly with EADDRINUSE, which is
+  // what you want to be told.
+  httpServer.listen({ port, host }, () => {
+    log(`serving on http://${host === "0.0.0.0" ? "localhost" : host}:${port}`);
+  });
 })();
