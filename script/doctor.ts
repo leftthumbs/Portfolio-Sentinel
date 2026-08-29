@@ -13,6 +13,7 @@
 import "dotenv/config";
 import { existsSync, copyFileSync } from "fs";
 import { Pool } from "pg";
+import { randomBytes } from "crypto";
 
 type Status = "ok" | "warn" | "fail";
 
@@ -86,12 +87,15 @@ async function checkDatabase() {
 
 function checkSessionSecret() {
   const secret = process.env.SESSION_SECRET;
+  // Suggesting `openssl rand` sent Windows users looking for a command they do
+  // not have. Node is by definition present -- this script is running on it --
+  // so generate the value here and let them paste it.
+  const suggestion = `Use this one: ${randomBytes(32).toString("base64")}`;
   if (!secret) {
-    add("Login security", "fail", "SESSION_SECRET is not set",
-        "Any long random string works. Generate one with: openssl rand -base64 32");
+    add("Login security", "fail", "SESSION_SECRET is not set", suggestion);
   } else if (secret.length < 16) {
     add("Login security", "warn", "SESSION_SECRET is short enough to be guessable",
-        "Replace it with a longer random string: openssl rand -base64 32");
+        `Replace it with something longer. ${suggestion}`);
   } else {
     add("Login security", "ok", "SESSION_SECRET is set");
   }
