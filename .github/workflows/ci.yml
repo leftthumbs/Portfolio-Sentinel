@@ -26,10 +26,10 @@ jobs:
       - name: Build client
         run: npx vite build
 
-      # Typecheck is reported but not enforced: the repo carries 34 pre-existing
-      # errors, mostly Drizzle inference in routes.ts and dead replit_integrations
-      # code. Failing on them would make CI red from the first run and train
-      # everyone to ignore it. Turn this into a gate once the count reaches zero.
+      # Typecheck is reported but not enforced: the repo carries 23 pre-existing
+      # errors, all Drizzle inference on query results in routes.ts. Failing on
+      # them would put CI red on its first run and train everyone to ignore it.
+      # Turn this into a gate once the count reaches zero.
       - name: Typecheck (informational)
         run: npx tsc --noEmit || true
         continue-on-error: true
