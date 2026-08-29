@@ -1,3 +1,7 @@
+// Loads a .env file if one is present, so credentials can live in a file
+// rather than being exported into the shell on every run. Real environment
+// variables always win, so a hosting platform's settings are not overridden.
+import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";

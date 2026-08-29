@@ -69,8 +69,14 @@ npm run build      # production build
 npm run db:push    # apply schema to the database
 ```
 
-Required environment: `DATABASE_URL`, `SESSION_SECRET`, `OPENAI_API_KEY`.
-Optional: `ALPHA_VANTAGE_API_KEY`, `FRED_API_KEY`, `OPENFIGI_API_KEY`.
+### Configuration
+Copy `.env.example` to `.env` and fill it in; `server/index.ts` and
+`drizzle.config.ts` both load it. Real environment variables take precedence, so
+a hosting platform's own settings are never overridden by the file.
+
+Required: `DATABASE_URL`, `SESSION_SECRET`, `OPENAI_API_KEY`.
+Optional: `GOOGLE_SERVICE_ACCOUNT_JSON`, the four OneDrive variables,
+`ALPHA_VANTAGE_API_KEY`, `FRED_API_KEY`, `OPENFIGI_API_KEY`.
 
 ## Cloud Document Import
 

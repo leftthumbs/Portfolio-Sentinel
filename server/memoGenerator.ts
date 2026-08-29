@@ -2,8 +2,8 @@ import OpenAI from "openai";
 import type { DataRoomDocument, Holding, Portfolio, RiskMetrics, MemoTemplateType } from "@shared/schema";
 
 const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: process.env.OPENAI_BASE_URL,
 });
 
 interface MemoContext {

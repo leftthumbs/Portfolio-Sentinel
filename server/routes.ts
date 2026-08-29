@@ -2851,8 +2851,8 @@ export async function registerRoutes(
           try {
             const OpenAI = (await import("openai")).default;
             const openai = new OpenAI({
-              apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-              baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+              apiKey: process.env.OPENAI_API_KEY,
+              baseURL: process.env.OPENAI_BASE_URL,
             });
 
             const ocrPrompt = `You are analyzing an investment document for historical return data. Scan the text below for any tables, lists, or series of periodic returns (monthly, quarterly, or annual performance data).
@@ -2919,8 +2919,8 @@ ${textContent.substring(0, 12000)}`;
           try {
             const OpenAI = (await import("openai")).default;
             const openai = new OpenAI({
-              apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-              baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+              apiKey: process.env.OPENAI_API_KEY,
+              baseURL: process.env.OPENAI_BASE_URL,
             });
 
             const ocrPrompt = `You are analyzing an investment document for historical return data. Scan the text below for any tables, lists, or series of periodic returns (daily, weekly, monthly, quarterly, or annual performance data).
@@ -3094,8 +3094,8 @@ ${textContent.substring(0, 12000)}`;
       if (textContent && textContent.trim().length >= 20) {
         const OpenAI = (await import("openai")).default;
         const openai = new OpenAI({
-          apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-          baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+          apiKey: process.env.OPENAI_API_KEY,
+          baseURL: process.env.OPENAI_BASE_URL,
         });
 
         const extractionPrompt = `Analyze the following investment document and extract key strategy information for a strategy library entry.
@@ -3313,8 +3313,8 @@ ${textContent.substring(0, 8000)}`;
       // Use OpenAI to extract fund details from the document
       const OpenAI = (await import("openai")).default;
       const openai = new OpenAI({
-        apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-        baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+        apiKey: process.env.OPENAI_API_KEY,
+        baseURL: process.env.OPENAI_BASE_URL,
       });
 
       const extractionPrompt = `Analyze the following fund document and extract key information. This may be an LPA (Limited Partnership Agreement), marketing deck, factsheet, or other fund documentation.
