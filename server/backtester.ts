@@ -9,6 +9,8 @@ export interface BacktestConfig {
   rebalanceFrequency?: "daily" | "weekly" | "monthly" | "quarterly" | "none";
   historicalReturns?: Map<string, number[]>;
   riskFreeRate?: number; // Annual risk-free rate (e.g., 0.04 for 4%)
+  /** Override to explore sampling variation; fixed by default so runs reproduce. */
+  seed?: number;
 }
 
 export interface PerformancePoint {
@@ -64,22 +66,44 @@ function getAssetReturns(assetClass: string): { annualReturn: number; volatility
   return assetClassReturns[assetClass] || assetClassReturns["Other"];
 }
 
-function randomNormal(): number {
+/**
+ * Deterministic PRNG (mulberry32) for the simulation draws.
+ *
+ * Seeded from the clock, the same portfolio over the same window produced a
+ * different answer on every run — a couple of percent apart on the final
+ * value. Backtest results are persisted and there is an audit export endpoint
+ * over them, so a stored figure could never be re-derived from its own inputs.
+ * Callers can override the seed to explore sampling variation deliberately.
+ */
+export const DEFAULT_BACKTEST_SEED = 0x8acf;
+
+function makeRandom(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function randomNormal(random: () => number): number {
   let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while (u === 0) u = random();
+  while (v === 0) v = random();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
-function generateDailyReturn(annualReturn: number, annualVolatility: number): number {
+function generateDailyReturn(annualReturn: number, annualVolatility: number, random: () => number): number {
   const dailyReturn = annualReturn / 252;
   const dailyVolatility = annualVolatility / Math.sqrt(252);
-  return dailyReturn + dailyVolatility * randomNormal();
+  return dailyReturn + dailyVolatility * randomNormal(random);
 }
 
-function sampleFromHistoricalReturns(returns: number[]): number {
+function sampleFromHistoricalReturns(returns: number[], random: () => number): number {
   if (returns.length === 0) return 0;
-  const index = Math.floor(Math.random() * returns.length);
+  const index = Math.floor(random() * returns.length);
   return returns[index];
 }
 
@@ -107,8 +131,9 @@ function runSingleSimulation(
   startDate: Date,
   endDate: Date,
   initialValue: number,
-  historicalReturns?: Map<string, number[]>,
-  riskFreeRate: number = 0.04
+  historicalReturns: Map<string, number[]> | undefined,
+  riskFreeRate: number,
+  random: () => number
 ): SimulationResult {
   const performanceData: PerformancePoint[] = [];
   let currentValue = initialValue;
@@ -131,7 +156,7 @@ function runSingleSimulation(
         const itemReturns = historicalReturns?.get(itemKey);
         
         if (itemReturns && itemReturns.length > 0) {
-          assetDailyReturn = sampleFromHistoricalReturns(itemReturns);
+          assetDailyReturn = sampleFromHistoricalReturns(itemReturns, random);
         } else {
           const assetParams = getAssetReturns(item.assetClass);
           const expectedReturn = item.expectedReturn 
@@ -141,7 +166,7 @@ function runSingleSimulation(
             ? parseFloat(item.volatility) 
             : assetParams.volatility;
           
-          assetDailyReturn = generateDailyReturn(expectedReturn, volatility);
+          assetDailyReturn = generateDailyReturn(expectedReturn, volatility, random);
         }
         
         portfolioDailyReturn += assetDailyReturn * item.normalizedWeight;
@@ -196,18 +221,27 @@ function runSingleSimulation(
 }
 
 export function runBacktest(config: BacktestConfig): BacktestOutput {
-  const { items, startDate, endDate, initialValue, numSimulations = 100, historicalReturns, riskFreeRate = 0.04 } = config;
-  
-  const totalWeight = items.reduce((sum, item) => sum + parseFloat(item.weight), 0);
-  const normalizedItems = items.map(item => ({
+  const { items, startDate, endDate, initialValue, historicalReturns, riskFreeRate = 0.04, seed = DEFAULT_BACKTEST_SEED } = config;
+
+  // At least one path, or the median lookup below indexes past the end of an
+  // empty array and throws.
+  const numSimulations = Math.max(1, Math.floor(config.numSimulations ?? 100));
+
+  // Weights that sum to zero would divide every allocation by zero and carry
+  // NaN through to the persisted result. Equal-weighting matches what the
+  // optimizer already does with a zero-sum weight vector.
+  const rawWeights = items.map(item => parseFloat(item.weight) || 0);
+  const totalWeight = rawWeights.reduce((sum, w) => sum + w, 0);
+  const normalizedItems = items.map((item, i) => ({
     ...item,
-    normalizedWeight: parseFloat(item.weight) / totalWeight,
+    normalizedWeight: totalWeight > 0 ? rawWeights[i] / totalWeight : 1 / (items.length || 1),
   }));
 
+  const random = makeRandom(seed);
   const simulationResults: SimulationResult[] = [];
-  
+
   for (let i = 0; i < numSimulations; i++) {
-    const result = runSingleSimulation(normalizedItems, startDate, endDate, initialValue, historicalReturns, riskFreeRate);
+    const result = runSingleSimulation(normalizedItems, startDate, endDate, initialValue, historicalReturns, riskFreeRate, random);
     simulationResults.push(result);
   }
 
