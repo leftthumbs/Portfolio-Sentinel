@@ -11,7 +11,7 @@ import { generateInvestmentMemo, analyzeDocumentContent } from "./memoGenerator"
 import { generateWordDocument, sanitizeFilename } from "./wordGenerator";
 import type { MemoTemplateType } from "@shared/schema";
 import { listOneDriveFiles, getOneDriveFileContent, searchOneDriveFiles } from "./onedrive";
-import { listDriveFiles, searchDriveFiles, getDriveFile, downloadDriveFile } from "./gmail";
+import { listLibraryMessages, downloadLibraryAttachment } from "./investmentLibrary";
 import { runBacktest } from "./backtester";
 import { analyzeIntervalFund, compareIntervalFunds, type IntervalFundAnalysisOutput } from "./intervalFundAnalyzer";
 import { validateIntervalFund, generateDataQualityReport } from "./dataValidation";
@@ -2432,52 +2432,43 @@ export async function registerRoutes(
   });
 
   // Investment Library (Google Drive) routes
-  app.get("/api/drive/files", async (req, res) => {
+  // Investment Library: fund documents filed under a Gmail label, read over
+  // IMAP. See server/investmentLibrary.ts for why not the Gmail API.
+  app.get("/api/library/messages", async (req, res) => {
     try {
-      const folderId = req.query.folderId as string | undefined;
-      const files = await listDriveFiles(folderId);
-      res.json({ files });
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const messages = await listLibraryMessages(limit);
+      res.json({ messages });
     } catch (error: any) {
-      console.error("Drive list files error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch files" });
-    }
-  });
-
-  app.get("/api/drive/files/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const file = await getDriveFile(id);
-      res.json(file);
-    } catch (error: any) {
-      console.error("Drive get file error:", error);
-      res.status(500).json({ message: error.message || "Failed to fetch file" });
-    }
-  });
-
-  app.get("/api/drive/files/:id/download", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const result = await downloadDriveFile(id);
-      res.setHeader("Content-Type", result.mimeType);
-      res.setHeader("Content-Disposition", `attachment; filename="${result.name}"`);
-      result.stream.pipe(res);
-    } catch (error: any) {
-      console.error("Drive download error:", error);
-      res.status(500).json({ message: error.message || "Failed to download file" });
-    }
-  });
-
-  app.get("/api/drive/search", async (req, res) => {
-    try {
-      const query = req.query.q as string;
-      if (!query) {
-        return res.status(400).json({ message: "Search query is required" });
+      console.error("Investment Library list error:", error);
+      if (error.message?.includes("not configured") || error.message?.includes("sign-in was rejected")) {
+        return res.status(503).json({ message: error.message });
       }
-      const files = await searchDriveFiles(query);
-      res.json({ files });
+      res.status(500).json({ message: error.message || "Failed to read the Investment Library" });
+    }
+  });
+
+  app.get("/api/library/messages/:uid/attachments/:filename", async (req, res) => {
+    try {
+      const uid = parseInt(req.params.uid, 10);
+      if (!Number.isFinite(uid)) {
+        return res.status(400).json({ message: "Invalid message id" });
+      }
+      const filename = decodeURIComponent(req.params.filename);
+      const file = await downloadLibraryAttachment(uid, filename);
+
+      res.setHeader("Content-Type", file.mimeType);
+      // Quotes and newlines in a sender-supplied filename would otherwise let
+      // the header be split; strip them rather than trusting the mailbox.
+      const safeName = file.filename.replace(/[^\w.\- ]+/g, "_");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName}"`);
+      res.send(file.buffer);
     } catch (error: any) {
-      console.error("Drive search error:", error);
-      res.status(500).json({ message: error.message || "Failed to search files" });
+      console.error("Investment Library download error:", error);
+      if (error.message?.includes("not configured") || error.message?.includes("sign-in was rejected")) {
+        return res.status(503).json({ message: error.message });
+      }
+      res.status(500).json({ message: error.message || "Failed to download the attachment" });
     }
   });
 

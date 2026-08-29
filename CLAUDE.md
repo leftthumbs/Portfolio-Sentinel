@@ -75,28 +75,41 @@ Copy `.env.example` to `.env` and fill it in; `server/index.ts` and
 a hosting platform's own settings are never overridden by the file.
 
 Required: `DATABASE_URL`, `SESSION_SECRET`, `OPENAI_API_KEY`.
-Optional: `GOOGLE_SERVICE_ACCOUNT_JSON`, the four OneDrive variables,
+Optional: `GMAIL_USER` and `GMAIL_APP_PASSWORD`, the four OneDrive variables,
 `ALPHA_VANTAGE_API_KEY`, `FRED_API_KEY`, `OPENFIGI_API_KEY`.
 
-## Cloud Document Import
+## Document Import
 
 Both integrations read a fixed folder on behalf of the application, not on
 behalf of whoever is signed in. That makes them server-to-server, so neither
 uses a user OAuth flow: there is no consent screen, and no refresh token to
 expire or be revoked.
 
-### Google Drive — service account
-1. Google Cloud console: create a project, enable the **Google Drive API**.
-2. Create a **service account**; create a key and download the JSON.
-3. In Google Drive, share the **Investment Library** folder with the service
-   account's email address (`...@....iam.gserviceaccount.com`). Viewer is
-   enough — the account can see nothing else, which is the point.
-4. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key file's contents, raw or
-   base64-encoded.
+### Investment Library — Gmail label over IMAP
+Fund documents arrive as email and are filed under a Gmail label, not a Drive
+folder. `server/investmentLibrary.ts` reads that label over IMAP.
 
-The app requests `drive.readonly` only. Download the **service account key**,
-not the OAuth client file — the latter parses as valid JSON but carries neither
-`client_email` nor `private_key`, and the code rejects it by name.
+1. Turn on **2-Step Verification** for the Google account.
+2. Create an app password at **myaccount.google.com/apppasswords**.
+3. Set `GMAIL_USER` and `GMAIL_APP_PASSWORD`. Optionally set
+   `GMAIL_LIBRARY_LABEL` if the label is not called "Investment Library".
+
+IMAP rather than the Gmail API is forced by the account type, and the reasoning
+is worth keeping because it looks like a shortcut and is not:
+
+- A **service account cannot read a personal mailbox**. Impersonation needs
+  domain-wide delegation, which requires a Workspace admin console.
+- **OAuth needs `gmail.readonly`, a restricted scope.** An app in Testing has
+  its refresh token revoked every seven days; production requires verification
+  including a third-party security audit.
+- An **app password** needs 2FA and nothing else, does not expire, and is
+  revocable from the Google account page.
+
+The connection is read-only, so opening a document does not mark mail as read.
+Attachments are filtered to document types; signature images and calendar
+invites are ignored. DocSend links in message bodies are surfaced too, since
+managers increasingly send a view-only room instead of an attachment — the
+`docsend-dataroom-capture` skill in this repo handles those.
 
 ### OneDrive — client credentials
 1. Microsoft Entra ID: **register an application**.

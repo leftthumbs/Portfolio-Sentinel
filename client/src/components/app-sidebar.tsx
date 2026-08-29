@@ -79,7 +79,7 @@ const navigationItems = [
   },
   {
     title: "Investment Library",
-    url: "/gmail",
+    url: "/investment-library",
     icon: HardDrive,
   },
   {
