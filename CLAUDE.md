@@ -72,13 +72,43 @@ npm run db:push    # apply schema to the database
 Required environment: `DATABASE_URL`, `SESSION_SECRET`, `OPENAI_API_KEY`.
 Optional: `ALPHA_VANTAGE_API_KEY`, `FRED_API_KEY`, `OPENFIGI_API_KEY`.
 
+## Cloud Document Import
+
+Both integrations read a fixed folder on behalf of the application, not on
+behalf of whoever is signed in. That makes them server-to-server, so neither
+uses a user OAuth flow: there is no consent screen, and no refresh token to
+expire or be revoked.
+
+### Google Drive — service account
+1. Google Cloud console: create a project, enable the **Google Drive API**.
+2. Create a **service account**; create a key and download the JSON.
+3. In Google Drive, share the **Investment Library** folder with the service
+   account's email address (`...@....iam.gserviceaccount.com`). Viewer is
+   enough — the account can see nothing else, which is the point.
+4. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key file's contents, raw or
+   base64-encoded.
+
+The app requests `drive.readonly` only. Download the **service account key**,
+not the OAuth client file — the latter parses as valid JSON but carries neither
+`client_email` nor `private_key`, and the code rejects it by name.
+
+### OneDrive — client credentials
+1. Microsoft Entra ID: **register an application**.
+2. Add the **`Files.Read.All` application permission** — the application
+   column, not delegated — and **grant admin consent**.
+3. Create a **client secret**.
+4. Set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and
+   `ONEDRIVE_USER` (the UPN or object id of the account whose OneDrive holds
+   the documents).
+
+`ONEDRIVE_USER` exists because of a trap worth knowing: under application
+permissions there is no signed-in user, so `/me/drive` does not resolve and
+every request returns 400. Every call addresses the drive explicitly via
+`/users/{id}/drive`. If you add a Graph call, do not reach for `/me`.
+
+Unconfigured, both return 503 with a message naming the missing variables.
+
 ## Known Constraints
-- **Google Drive and OneDrive import only work on Replit.** `server/gmail.ts`
-  and `server/onedrive.ts` fetch credentials from Replit's connector broker via
-  `REPLIT_CONNECTORS_HOSTNAME`, authenticated with `REPL_IDENTITY` or
-  `WEB_REPL_RENEWAL`. Off Replit those variables do not exist and both throw,
-  taking eight endpoints with them. Moving to standard OAuth client credentials
-  is the remaining piece of un-Replit-ing this project.
 - **The app will not start without `OPENAI_API_KEY`.** `memoGenerator.ts`
   constructs the client at module load, so a missing key stops the process
   before it can serve anything, including pages that never touch AI.

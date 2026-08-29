@@ -3,61 +3,77 @@ import { google, drive_v3 } from 'googleapis';
 // Hardcoded folder name restriction - only this folder is accessible
 const ALLOWED_FOLDER_NAME = 'Investment Library';
 
-let connectionSettings: any;
 // Cache the Investment Library folder ID after first lookup
 let investmentLibraryFolderId: string | null = null;
 
-async function getAccessToken() {
-  if (connectionSettings && connectionSettings.settings.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-    return connectionSettings.settings.access_token;
-  }
+/**
+ * Google Drive credentials.
+ *
+ * This is server-to-server access to one fixed folder, not access on behalf of
+ * whoever is signed in, so a service account is the right mechanism rather than
+ * a user OAuth flow. There is no consent screen, no refresh token to expire or
+ * be revoked, and the account can only see what has been explicitly shared with
+ * it — least privilege by construction rather than by scope discipline.
+ *
+ * Setup: create a service account in Google Cloud, enable the Drive API, then
+ * share the "Investment Library" folder with the service account's email
+ * address (Viewer is enough). Put the downloaded key JSON in
+ * GOOGLE_SERVICE_ACCOUNT_JSON, raw or base64-encoded.
+ */
+export interface ServiceAccountCredentials {
+  client_email: string;
+  private_key: string;
+}
 
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY
-    ? 'repl ' + process.env.REPL_IDENTITY
-    : process.env.WEB_REPL_RENEWAL
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL
-    : null;
+/**
+ * Parses the service account key out of the environment.
+ *
+ * Accepts raw JSON or base64. Raw JSON in an environment variable usually
+ * arrives with the private key's newlines escaped as literal backslash-n,
+ * which the JWT signer rejects with an opaque error, so they are restored here.
+ */
+export function parseServiceAccountJson(raw: string): ServiceAccountCredentials {
+  const text = raw.trim().startsWith("{")
+    ? raw
+    : Buffer.from(raw, "base64").toString("utf8");
 
-  if (!hostname) {
-    throw new Error('Google Drive not configured: REPLIT_CONNECTORS_HOSTNAME environment variable is not set.');
-  }
-
-  if (!xReplitToken) {
-    throw new Error('Google Drive not configured: authentication token not found. Ensure REPL_IDENTITY or WEB_REPL_RENEWAL environment variables are set.');
-  }
-
+  let parsed: Record<string, unknown>;
   try {
-    connectionSettings = await fetch(
-      'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=google-mail',
-      {
-        headers: {
-          'Accept': 'application/json',
-          'X_REPLIT_TOKEN': xReplitToken
-        }
-      }
-    ).then(res => res.json()).then(data => data.items?.[0]);
-  } catch (fetchError) {
-    throw new Error('Google Drive not configured: failed to reach connector service.');
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. Paste the downloaded key file verbatim, or base64-encode it.",
+    );
   }
 
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
-
-  if (!connectionSettings || !accessToken) {
-    throw new Error('Google account not connected: no OAuth access token found. Connect your Google account in the Replit Connections panel.');
+  const clientEmail = parsed.client_email;
+  const privateKey = parsed.private_key;
+  if (typeof clientEmail !== "string" || typeof privateKey !== "string") {
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT_JSON is missing client_email or private_key. Use the service account key file, not the OAuth client file.",
+    );
   }
-  return accessToken;
+
+  return { client_email: clientEmail, private_key: privateKey.replace(/\\n/g, "\n") };
+}
+
+/** Read-only: the app lists, reads metadata, and downloads. It never writes. */
+export const DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"];
+
+function getServiceAccountAuth() {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) {
+    throw new Error(
+      "Google Drive is not configured. Set GOOGLE_SERVICE_ACCOUNT_JSON to a Google Cloud service account key, and share the \"Investment Library\" folder with that account's email address.",
+    );
+  }
+
+  const { client_email, private_key } = parseServiceAccountJson(raw);
+  return new google.auth.JWT({ email: client_email, key: private_key, scopes: DRIVE_SCOPES });
 }
 
 async function getDriveClient(): Promise<drive_v3.Drive> {
-  const accessToken = await getAccessToken();
-
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({
-    access_token: accessToken
-  });
-
-  return google.drive({ version: 'v3', auth: oauth2Client });
+  return google.drive({ version: "v3", auth: getServiceAccountAuth() });
 }
 
 /**

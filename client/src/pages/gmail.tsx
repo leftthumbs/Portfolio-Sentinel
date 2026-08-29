@@ -260,12 +260,13 @@ export default function InvestmentLibraryPage() {
               <div className="text-center space-y-2 max-w-md">
                 <p className="font-medium">Google Drive Connection Required</p>
                 <p className="text-sm text-muted-foreground">
-                  Unable to connect to Google Drive. This feature requires a Google OAuth connection
-                  and an "Investment Library" folder in your Google Drive.
+                  Unable to reach Google Drive. This feature reads a folder named
+                  "Investment Library" through a Google Cloud service account.
                 </p>
                 <p className="text-xs text-muted-foreground mt-3">
-                  Ensure the Google connector is enabled in Replit and that a folder named
-                  "Investment Library" exists in your Drive.
+                  Check that GOOGLE_SERVICE_ACCOUNT_JSON is set, that the "Investment Library"
+                  folder exists, and that it has been shared with the service account&apos;s email
+                  address.
                 </p>
               </div>
             </div>

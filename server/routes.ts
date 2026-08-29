@@ -2354,10 +2354,10 @@ export async function registerRoutes(
       res.json({ files });
     } catch (error: any) {
       console.error("OneDrive files error:", error);
-      if (error.message?.includes('not connected')) {
-        return res.status(401).json({ message: "OneDrive not connected. Please connect your account." });
+      if (error.message?.includes('not configured')) {
+        return res.status(503).json({ message: error.message });
       }
-      res.status(500).json({ message: "Failed to fetch OneDrive files" });
+      res.status(500).json({ message: error.message || "Failed to fetch OneDrive files" });
     }
   });
 
@@ -2371,7 +2371,10 @@ export async function registerRoutes(
       res.json({ files });
     } catch (error: any) {
       console.error("OneDrive search error:", error);
-      res.status(500).json({ message: "Failed to search OneDrive" });
+      if (error.message?.includes("not configured")) {
+        return res.status(503).json({ message: error.message });
+      }
+      res.status(500).json({ message: error.message || "Failed to search OneDrive" });
     }
   });
 
@@ -2421,7 +2424,10 @@ export async function registerRoutes(
       res.status(201).json({ document });
     } catch (error: any) {
       console.error("OneDrive import error:", error);
-      res.status(500).json({ message: "Failed to import file from OneDrive" });
+      if (error.message?.includes("not configured")) {
+        return res.status(503).json({ message: error.message });
+      }
+      res.status(500).json({ message: error.message || "Failed to import file from OneDrive" });
     }
   });
 
