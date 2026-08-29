@@ -10,7 +10,8 @@
     "check": "tsc",
     "db:push": "drizzle-kit push",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check-setup": "tsx script/doctor.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

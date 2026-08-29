@@ -67,7 +67,14 @@ npm test           # 359 tests
 npm run check      # typecheck (23 pre-existing errors, all in routes.ts)
 npm run build      # production build
 npm run db:push    # apply schema to the database
+npm run check-setup # report what is configured, what is not, and how to fix it
 ```
+
+`check-setup` is the first thing to run on a new machine. It creates `.env`
+from the template if missing, connects to the database, signs in to Gmail and
+Microsoft where configured, and names the specific value at fault for anything
+that fails. It exits non-zero only when something would stop the app booting —
+a broken optional integration is reported without blocking.
 
 ### Configuration
 Copy `.env.example` to `.env` and fill it in; `server/index.ts` and
